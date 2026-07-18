@@ -26,7 +26,18 @@ def test_service_configuration_accepts_explicit_github_and_backup_values(monkeyp
 
     assert config.backup_dir == tmp_path / "backup"
     assert (config.github_project_id, config.github_owner, config.github_repository) == ("PVT_1", "owner", "repo")
-    assert config.github_token_env == "GITHUB_TOKEN"
+    assert config.github_project_token_env == "GITHUB_TOKEN"
+    assert config.github_issues_token_env == "ADK_AGENTS_GITHUB_ISSUES_TOKEN"
+
+
+def test_service_configuration_keeps_project_and_issues_credentials_separate(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADK_AGENTS_DATA_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ADK_AGENTS_GITHUB_PROJECT_TOKEN_ENV", "PROJECT_TOKEN")
+    monkeypatch.setenv("ADK_AGENTS_GITHUB_ISSUES_TOKEN_ENV", "ISSUES_TOKEN")
+
+    config = ServiceConfig.from_environment()
+
+    assert (config.github_project_token_env, config.github_issues_token_env) == ("PROJECT_TOKEN", "ISSUES_TOKEN")
 
 
 def test_project_configuration_is_constructed_only_when_all_protocol_ids_are_present(monkeypatch, tmp_path):

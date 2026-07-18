@@ -21,7 +21,8 @@ class ServiceConfig:
     blocked_option_id: str | None
     github_status_field_id: str | None
     github_dispatch_field_id: str | None
-    github_token_env: str
+    github_project_token_env: str
+    github_issues_token_env: str
 
     @classmethod
     def from_environment(cls) -> "ServiceConfig":
@@ -41,10 +42,13 @@ class ServiceConfig:
             raise ValueError("GitHub board configuration requires all Project and status option IDs")
         if any((status_field, dispatch_field)) and not all((project_id, status_field, dispatch_field)):
             raise ValueError("GitHub Project writer configuration requires project, Status field, and Dispatch ID field IDs")
-        token_env = os.environ.get("ADK_AGENTS_GITHUB_TOKEN_ENV", "GITHUB_TOKEN")
-        if not token_env.isidentifier():
-            raise ValueError("GitHub token configuration must name an environment variable")
-        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, dispatch_field, token_env)
+        project_token_env = os.environ.get("ADK_AGENTS_GITHUB_PROJECT_TOKEN_ENV", "GITHUB_TOKEN")
+        issues_token_env = os.environ.get("ADK_AGENTS_GITHUB_ISSUES_TOKEN_ENV", "ADK_AGENTS_GITHUB_ISSUES_TOKEN")
+        if not project_token_env.isidentifier() or not issues_token_env.isidentifier():
+            raise ValueError("GitHub token configuration must name environment variables")
+        if project_token_env == issues_token_env:
+            raise ValueError("GitHub Project and Issues credentials must use separate environment variables")
+        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, dispatch_field, project_token_env, issues_token_env)
 
     def board_config(self) -> BoardConfig | None:
         if self.github_project_id is None:
