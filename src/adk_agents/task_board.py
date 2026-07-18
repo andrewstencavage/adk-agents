@@ -137,6 +137,10 @@ class DispatchStore:
         with self._connect() as db:
             db.execute("UPDATE board_dispatch SET confirmed = 1 WHERE dispatch_id = ?", (dispatch_id,))
 
+    def observe_status(self, project_item_id: str, status: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE board_observation SET last_status = ? WHERE project_item_id = ?", (status, project_item_id))
+
     def existing(self, story: ProjectStory) -> Dispatch | None:
         if story.dispatch_id is None:
             return None
@@ -176,7 +180,16 @@ class TaskBoardAdapter:
             if not self._is_ready(current):
                 return None
             if not self._store.has_comment(dispatch.dispatch_id):
-                comment_id = self._gateway.add_comment(current.issue_node_id, _claim_comment(dispatch, current))
+                comment_id = next(
+                    (
+                        comment.comment_id
+                        for comment in self._gateway.list_comments(current.issue_node_id)
+                        if f'"dispatch_id":"{dispatch.dispatch_id}"' in comment.body
+                    ),
+                    None,
+                )
+                if comment_id is None:
+                    comment_id = self._gateway.add_comment(current.issue_node_id, _claim_comment(dispatch, current))
                 self._store.record_comment(dispatch.dispatch_id, comment_id)
             current = self._gateway.get_story(candidate.project_item_id)
             if not self._is_ready(current):
@@ -189,6 +202,7 @@ class TaskBoardAdapter:
             final = self._gateway.get_story(candidate.project_item_id)
             if final.status_option_id == self._config.in_progress_option_id and final.dispatch_id == dispatch.dispatch_id:
                 self._store.confirm(dispatch.dispatch_id)
+                self._store.observe_status(final.project_item_id, final.status_option_id)
                 return dispatch
             return None
 
