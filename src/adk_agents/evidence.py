@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from .operational_record import OperationalRecord
+from .ids import uuid7
 
 
 def _digest(value: Any) -> str:
@@ -43,17 +44,23 @@ class ArtifactStore:
             raise FileExistsError("provided digest does not match artifact bytes")
         target = self._directory / actual_digest.removeprefix("sha256:")[:2] / actual_digest.removeprefix("sha256:")
         target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
+        if target.exists():
             if target.read_bytes() != payload:
-                raise
+                raise FileExistsError("artifact path conflicts with its content address")
         else:
+            descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=".artifact-", text=False)
             with os.fdopen(descriptor, "wb") as file:
                 file.write(payload)
                 file.flush()
                 os.fsync(file.fileno())
-            target.chmod(0o400)
+            os.chmod(temporary, 0o400)
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                if target.read_bytes() != payload:
+                    raise
+            finally:
+                os.unlink(temporary)
         manifest = ArtifactManifest(actual_digest, logical_type, len(payload), target)
         with self._record.connection() as connection:
             existing = connection.execute("SELECT logical_type, retention_class FROM artifact_manifest WHERE digest = ?", (manifest.digest,)).fetchone()
@@ -84,7 +91,7 @@ class EvidenceLedger:
         return self._record
 
     def append(self, *, action_type: str, input_value: Any = None, output_value: Any = None, dispatch_id: str | None = None, invocation_id: str | None = None, outcome_class: str | None = None, error_class: str | None = None, artifact_digest: str | None = None) -> str:
-        event_id = str(uuid4())
+        event_id = uuid7()
         with self._record.connection() as connection:
             connection.execute(
                 "INSERT INTO evidence_ledger (event_id, dispatch_id, invocation_id, action_type, input_digest, output_digest, outcome_class, error_class, artifact_digest, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

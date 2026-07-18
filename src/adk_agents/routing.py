@@ -7,11 +7,11 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from uuid import uuid4
 
 from .contracts import SpecialistType
 from .evidence import EvidenceLedger
 from .operational_record import OperationalRecord
+from .ids import uuid7
 
 
 class AssessmentStatus(str, Enum):
@@ -69,7 +69,7 @@ class ModelRouter:
         with self._record.connection() as connection:
             connection.execute(
                 "INSERT INTO model_assessment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid4()), assessment.suite_version, assessment.model.runtime_id, assessment.model.model_id, assessment.model.fingerprint, assessment.model.runtime_version, assessment.role.value, assessment.status.value, assessment.score, assessment.artifact_ref, _now()),
+                (uuid7(), assessment.suite_version, assessment.model.runtime_id, assessment.model.model_id, assessment.model.fingerprint, assessment.model.runtime_version, assessment.role.value, assessment.status.value, assessment.score, assessment.artifact_ref, _now()),
             )
 
     def select(self, request: RouteRequest, inventory: list[ModelRef] | None = None) -> ModelSelection:
@@ -87,7 +87,7 @@ class ModelRouter:
             selected, override = sorted(eligible, key=lambda candidate: (-self._score(candidate, request.role), candidate.runtime_id, candidate.model_id, candidate.fingerprint))[0], False
         evidence_ref = _digest({"dispatch_id": request.dispatch_id, "role": request.role.value, "selected": selected, "override": override})
         with self._record.connection() as connection:
-            connection.execute("INSERT INTO model_selection VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (str(uuid4()), request.dispatch_id, request.role.value, selected.runtime_id, selected.model_id, selected.fingerprint, int(override), "selected", evidence_ref, _now()))
+            connection.execute("INSERT INTO model_selection VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (uuid7(), request.dispatch_id, request.role.value, selected.runtime_id, selected.model_id, selected.fingerprint, int(override), "selected", evidence_ref, _now()))
         self._ledger.append(action_type="model_selected", input_value=request, output_value=selected, dispatch_id=request.dispatch_id, outcome_class="selected")
         return ModelSelection(selected, override, evidence_ref)
 
@@ -106,7 +106,7 @@ class ModelRouter:
     def _record_block(self, request: RouteRequest, reason: str) -> str:
         evidence_ref = _digest({"dispatch_id": request.dispatch_id, "role": request.role.value, "reason": reason})
         with self._record.connection() as connection:
-            connection.execute("INSERT INTO model_selection VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (str(uuid4()), request.dispatch_id, request.role.value, None, None, None, 0, "blocked", evidence_ref, _now()))
+            connection.execute("INSERT INTO model_selection VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (uuid7(), request.dispatch_id, request.role.value, None, None, None, 0, "blocked", evidence_ref, _now()))
         self._ledger.append(action_type="model_routing_blocked", input_value=request, dispatch_id=request.dispatch_id, outcome_class="blocked")
         return evidence_ref
 
