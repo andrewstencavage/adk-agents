@@ -40,6 +40,15 @@ def test_python_command_profile_rejects_git_network_and_package_install_without_
     assert calls == [("pytest",)]
 
 
+def test_coding_scope_expansion_requires_a_recorded_scrum_master_approval(tmp_path):
+    session = CodingSession(tmp_path, approved_paths=("src",), approved_commands=("pytest",))
+
+    with pytest.raises(PermissionError):
+        session.approve_expansion(("docs",), (), "")
+    session.approve_expansion(("docs",), (), "comment:123")
+    assert not session.propose_change("docs/decision.md").blocked
+
+
 def test_review_requires_read_only_checkout_and_only_creates_pr_after_acceptance():
     created: list[dict[str, object]] = []
     service = ReviewService(lambda body: created.append(body) or "pr-7")

@@ -42,6 +42,12 @@ class CodingSession:
         self._changed.append(path)
         return ScopeResult(False)
 
+    def approve_expansion(self, paths: tuple[str, ...], commands: tuple[str, ...], scrum_master_record: str) -> None:
+        if not scrum_master_record.startswith("comment:"):
+            raise PermissionError("scope expansion requires a recorded Scrum Master approval")
+        self._paths = (*self._paths, *paths)
+        self.approved_commands = (*self.approved_commands, *commands)
+
     @property
     def changed_paths(self) -> tuple[str, ...]:
         return tuple(self._changed)
