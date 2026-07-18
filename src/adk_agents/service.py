@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
+from .config import ServiceConfig
 from .operational_record import OperationalRecord
 
 
 def main() -> None:
     """Run startup safety checks; a host scheduler owns the polling loop."""
-    data_dir = Path(os.environ.get("ADK_AGENTS_DATA_DIR", "/var/lib/adk-agents"))
-    OperationalRecord(data_dir / "record.sqlite3").startup()
+    config = ServiceConfig.from_environment()
+    config.backup_dir.mkdir(parents=True, exist_ok=True)
+    OperationalRecord(config.data_dir / "record.sqlite3").startup()
 
 
 if __name__ == "__main__":
