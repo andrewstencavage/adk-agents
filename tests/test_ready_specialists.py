@@ -77,3 +77,5 @@ def test_persistent_incident_survives_restart_without_a_duplicate_publish(tmp_pa
     restarted = PersistentIncidentTracker(record, lambda incident, evidence: published.append((incident, evidence)))
     assert restarted.record_failure("backup", "sha256:evidence") == "incident:backup"
     assert published == [("incident:backup", "sha256:evidence")]
+    assert restarted.record_recovery("backup", healthy_hours=23) is None
+    assert restarted.record_recovery("backup", healthy_hours=24) == "incident:backup"

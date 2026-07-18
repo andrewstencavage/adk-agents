@@ -57,3 +57,16 @@ class PersistentIncidentTracker:
         if incident and failures == 3:
             self._publish(incident, evidence_ref)
         return incident
+
+    def record_recovery(self, operation: str, *, healthy_hours: int) -> str | None:
+        if healthy_hours < 24:
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        with self._record.connection() as connection:
+            row = connection.execute("SELECT incident_ref FROM operational_incident WHERE operation = ? AND incident_ref <> '' AND closed_at IS NULL", (operation,)).fetchone()
+            if row is None:
+                return None
+            incident = row["incident_ref"]
+            connection.execute("UPDATE operational_incident SET closed_at = ?, healthy_since = ?, consecutive_failures = 0 WHERE operation = ?", (now, now, operation))
+        self._publish(incident, "recovered")
+        return incident
