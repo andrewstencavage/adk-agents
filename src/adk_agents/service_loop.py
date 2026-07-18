@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from time import sleep
 from typing import Any, Protocol
+from .task_format import parse_task_block
+
+def task_from_issue_body(body: str, dispatch_id: str) -> dict[str, Any]:
+    """Build the Manager input only from the explicit, validated issue block."""
+    return parse_task_block(body, dispatch_id=dispatch_id).model_dump(mode="json")
 
 
 class ClaimingBoard(Protocol):

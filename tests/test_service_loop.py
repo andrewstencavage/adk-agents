@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 from adk_agents.contracts import SpecialistResult, TaskStatus
 from adk_agents.service_loop import PollingService
+from adk_agents.service_loop import task_from_issue_body
+from datetime import datetime, timedelta, timezone
+import json
 
 
 @dataclass(frozen=True)
@@ -53,3 +56,8 @@ def test_polling_service_runs_serial_ticks_until_the_host_stops_it():
 
     assert waits == [5]
     assert len(workflow.events) == 1
+
+def test_task_builder_accepts_only_the_structured_issue_block():
+    raw = {"control_issue_ref":"#1","story_ref":"#20","specialist":"research","objective":"x","acceptance_criteria":["y"],"requested_by":"andrew","deadline":(datetime.now(timezone.utc)+timedelta(days=1)).isoformat(),"budget_steps":1}
+    task = task_from_issue_body("```adk-task\n" + json.dumps(raw) + "\n```", "dispatch-0003")
+    assert task["dispatch_id"] == "dispatch-0003"
