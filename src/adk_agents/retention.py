@@ -7,10 +7,10 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
 
 from .evidence import ArtifactStore
 from .operational_record import OperationalRecord
+from .ids import uuid7
 
 
 @dataclass(frozen=True)
@@ -33,10 +33,12 @@ class RetentionService:
         quarantined = deleted = failures = 0
         self._quarantine.mkdir(parents=True, exist_ok=True)
         with self._record.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 "SELECT digest, storage_path FROM artifact_manifest WHERE quarantined_at IS NULL AND ((retention_class = 'routine' AND created_at < ?) OR (retention_class = 'protected' AND created_at < ?)) AND NOT EXISTS (SELECT 1 FROM evidence_ledger WHERE artifact_digest = artifact_manifest.digest)",
                 ((now - timedelta(days=90)).isoformat(), (now - timedelta(days=180)).isoformat()),
             ).fetchall()
+            candidate_count = len(rows)
             for row in rows:
                 try:
                     os.replace(row["storage_path"], self._quarantine / row["digest"].removeprefix("sha256:"))
@@ -48,6 +50,7 @@ class RetentionService:
                 "SELECT digest FROM artifact_manifest WHERE quarantined_at < ? AND NOT EXISTS (SELECT 1 FROM evidence_ledger WHERE artifact_digest = artifact_manifest.digest)",
                 ((now - timedelta(days=7)).isoformat(),),
             ).fetchall()
+            candidate_count += len(expired)
             for row in expired:
                 try:
                     (self._quarantine / row["digest"].removeprefix("sha256:")).unlink(missing_ok=True)
@@ -64,6 +67,6 @@ class RetentionService:
         with self._record.connection() as connection:
             connection.execute(
                 "INSERT INTO cleanup_run (run_id, policy_version, candidate_count, quarantined_count, deleted_count, failure_count, summary_artifact_digest, created_at) VALUES (?, 'v1', ?, ?, ?, ?, ?, ?)",
-                (str(uuid4()), quarantined + deleted + failures, quarantined, deleted, failures, summary.digest, now.isoformat()),
+                (uuid7(), candidate_count, quarantined, deleted, failures, summary.digest, now.isoformat()),
             )
         return CleanupResult(quarantined, deleted, failures)

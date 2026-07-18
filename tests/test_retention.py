@@ -24,4 +24,5 @@ def test_cleanup_quarantines_expired_routine_evidence_then_removes_it_after_reco
     assert second.deleted_count == 1
     with record.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM cleanup_run").fetchone()[0] == 2
+        assert connection.execute("SELECT candidate_count FROM cleanup_run ORDER BY created_at LIMIT 1").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM artifact_manifest WHERE digest = ?", (manifest.digest,)).fetchone()[0] == 0
