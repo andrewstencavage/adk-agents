@@ -77,6 +77,7 @@ def test_live_worker_composes_only_when_both_github_credentials_and_ids_are_pres
         "ADK_AGENTS_GITHUB_OWNER": "owner", "ADK_AGENTS_GITHUB_REPOSITORY": "repo",
         "ADK_AGENTS_READY_OPTION_ID": "ready", "ADK_AGENTS_IN_PROGRESS_OPTION_ID": "progress",
         "ADK_AGENTS_BLOCKED_OPTION_ID": "blocked", "ADK_AGENTS_GITHUB_STATUS_FIELD_ID": "status",
+        "ADK_AGENTS_GITHUB_PRIMARY_SPECIALIST_FIELD_ID": "primary",
         "ADK_AGENTS_GITHUB_DISPATCH_FIELD_ID": "dispatch", "GITHUB_TOKEN": "project-token",
         "ADK_AGENTS_GITHUB_ISSUES_TOKEN": "issues-token",
     }.items():

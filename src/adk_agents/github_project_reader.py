@@ -108,8 +108,9 @@ class GitHubIssueComments:
 
 
 class GitHubProjectReader:
-    def __init__(self, config: BoardConfig, graphql: GraphQLTransport, *, dispatch_field_id: str | None = None) -> None:
-        self._config, self._graphql, self._dispatch_field_id = config, graphql, dispatch_field_id
+    def __init__(self, config: BoardConfig, graphql: GraphQLTransport, *, status_field_id: str | None = None, primary_specialist_field_id: str | None = None, dispatch_field_id: str | None = None) -> None:
+        self._config, self._graphql = config, graphql
+        self._status_field_id, self._primary_specialist_field_id, self._dispatch_field_id = status_field_id, primary_specialist_field_id, dispatch_field_id
         self._issues: dict[str, int] = {}
 
     def list_ready_stories(self) -> list[ProjectStory]:
@@ -138,8 +139,8 @@ class GitHubProjectReader:
             return None
         values = {value.get("field", {}).get("name"): value for value in item["fieldValues"]["nodes"]}
         values_by_id = {value.get("field", {}).get("id"): value for value in item["fieldValues"]["nodes"]}
-        status = values.get("Status", {}).get("optionId")
-        primary = values.get("Primary Specialist", {}).get("name")
+        status = values_by_id.get(self._status_field_id, {}).get("optionId") if self._status_field_id else values.get("Status", {}).get("optionId")
+        primary = values_by_id.get(self._primary_specialist_field_id, {}).get("name") if self._primary_specialist_field_id else values.get("Primary Specialist", {}).get("name")
         dispatch = values_by_id.get(self._dispatch_field_id, {}).get("text")
         self._issues[issue["id"]] = issue["number"]
         return ProjectStory(self._config.project_id, self._config.owner, self._config.repository, item["id"], issue["id"], issue["number"], True, frozenset({"adk:story"}), status, item["updatedAt"], item["updatedAt"], primary, dispatch)

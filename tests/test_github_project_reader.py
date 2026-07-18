@@ -21,7 +21,7 @@ class FakeGraphQL:
 
 def test_reader_returns_only_open_managed_ready_story_candidates():
     config = BoardConfig("project", "owner", "repo", "ready", "progress", "blocked")
-    stories = GitHubProjectReader(config, FakeGraphQL(), dispatch_field_id="dispatch-field").list_ready_stories()
+    stories = GitHubProjectReader(config, FakeGraphQL(), status_field_id="status-field", primary_specialist_field_id="primary-field", dispatch_field_id="dispatch-field").list_ready_stories()
 
     assert len(stories) == 1
     assert stories[0].issue_number == 15
