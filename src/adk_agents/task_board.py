@@ -48,6 +48,7 @@ class ProjectStory:
     labels: frozenset[str]
     status_option_id: str
     updated_at: str
+    status_version: str
     primary_specialist: str | None
     dispatch_id: str | None = None
 
@@ -102,6 +103,7 @@ class DispatchStore:
                     issue_node_id TEXT NOT NULL,
                     ready_generation INTEGER NOT NULL,
                     source_updated_at TEXT NOT NULL,
+                    source_status_version TEXT NOT NULL,
                     state TEXT NOT NULL CHECK(state IN ('intent', 'confirmed', 'superseded')),
                     event_id TEXT NOT NULL,
                     comment_id TEXT,
@@ -109,6 +111,16 @@ class DispatchStore:
                     created_at TEXT NOT NULL,
                     UNIQUE(project_id, project_item_id, ready_generation)
                 );
+                CREATE TABLE IF NOT EXISTS board_lease (
+                    lease_name TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS schema_migration (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (1, CURRENT_TIMESTAMP);
                 """
             )
 
@@ -148,8 +160,8 @@ class DispatchStore:
                 dispatch_id = _uuid7()
                 connection.execute(
                     """INSERT INTO board_dispatch
-                       (dispatch_id, project_id, project_item_id, issue_node_id, ready_generation, source_updated_at, state, event_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'intent', ?, ?)""",
+                       (dispatch_id, project_id, project_item_id, issue_node_id, ready_generation, source_updated_at, source_status_version, state, event_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)""",
                     (
                         dispatch_id,
                         story.project_id,
@@ -157,6 +169,7 @@ class DispatchStore:
                         story.issue_node_id,
                         generation,
                         story.updated_at,
+                        story.status_version,
                         _uuid7(),
                         _utc_now(),
                     ),
@@ -201,6 +214,13 @@ class DispatchStore:
             "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
         }
         return "<!-- adk-event:v1\n" + json.dumps(envelope, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
+
+    def event_id(self, dispatch_id: str) -> str:
+        with self._connect() as connection:
+            row = connection.execute("SELECT event_id FROM board_dispatch WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+        if row is None:
+            raise ValueError("unknown dispatch")
+        return row["event_id"]
 
     def comment_id(self, dispatch_id: str) -> str | None:
         with self._connect() as connection:
@@ -250,9 +270,29 @@ class DispatchStore:
                 "UPDATE board_dispatch SET state = 'superseded' WHERE dispatch_id = ?", (dispatch_id,)
             )
 
+    def acquire_lease(self, owner_id: str, ttl_seconds: int = 60) -> bool:
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT owner_id, expires_at FROM board_lease WHERE lease_name = 'claim'").fetchone()
+            if row is not None and row["owner_id"] != owner_id and row["expires_at"] > now:
+                return False
+            connection.execute(
+                """INSERT INTO board_lease(lease_name, owner_id, expires_at) VALUES ('claim', ?, ?)
+                   ON CONFLICT(lease_name) DO UPDATE SET owner_id = excluded.owner_id, expires_at = excluded.expires_at""",
+                (owner_id, now + ttl_seconds),
+            )
+            return True
+
+    def release_lease(self, owner_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM board_lease WHERE lease_name = 'claim' AND owner_id = ?", (owner_id,))
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
         return connection
 
 
@@ -263,9 +303,18 @@ class TaskBoardAdapter:
         self._config = config
         self._gateway = gateway
         self._store = store
+        self._lease_owner = _uuid7()
 
     def claim_ready_story(self, candidate: ProjectStory) -> Dispatch | None:
         """Converge an eligible Ready story to one confirmed dispatch or no-op."""
+        if not self._store.acquire_lease(self._lease_owner):
+            return None
+        try:
+            return self._claim_ready_story(candidate)
+        finally:
+            self._store.release_lease(self._lease_owner)
+
+    def _claim_ready_story(self, candidate: ProjectStory) -> Dispatch | None:
         recovered = self._store.confirmed_dispatch(candidate)
         if (
             recovered is not None
@@ -276,7 +325,7 @@ class TaskBoardAdapter:
         if (
             pending is not None
             and candidate.status_option_id == self._config.in_progress_option_id
-            and self._find_claim_comment(candidate.issue_node_id, pending.dispatch_id) is not None
+            and self._find_claim_comment(candidate.issue_node_id, pending.dispatch_id, candidate.project_item_id) is not None
         ):
             self._store.confirm(pending.dispatch_id)
             return pending
@@ -295,7 +344,7 @@ class TaskBoardAdapter:
 
         if self._store.comment_id(dispatch.dispatch_id) is None:
             comment = self._store.claim_event(dispatch.dispatch_id, current)
-            existing = self._find_claim_comment(current.issue_node_id, dispatch.dispatch_id)
+            existing = self._find_claim_comment(current.issue_node_id, dispatch.dispatch_id, current.project_item_id)
             if existing is None:
                 comment_id = self._gateway.add_comment(current.issue_node_id, comment)
                 comment_body = comment
@@ -342,9 +391,15 @@ class TaskBoardAdapter:
             and story.repository == self._config.repository
         )
 
-    def _find_claim_comment(self, issue_node_id: str, dispatch_id: str) -> BoardComment | None:
+    def _find_claim_comment(self, issue_node_id: str, dispatch_id: str, project_item_id: str) -> BoardComment | None:
+        expected_event_id = self._store.event_id(dispatch_id)
         for comment in self._gateway.list_comments(issue_node_id):
-            if _is_matching_claim_event(comment.body, dispatch_id):
+            event = _parse_event(comment.body)
+            if event is None or event.get("dispatch_id") != dispatch_id:
+                continue
+            if event.get("event_id") != expected_event_id or event.get("payload") != {"project_item_id": project_item_id, "status": "In Progress"}:
+                raise EventIntegrityError("conflicting claim event for dispatch")
+            if event.get("kind") == "dispatch.claimed":
                 return comment
         return None
 
@@ -353,15 +408,26 @@ def _body_digest(body: str) -> str:
     return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
-def _is_matching_claim_event(body: str, dispatch_id: str) -> bool:
+class EventIntegrityError(ValueError):
+    """A matching dispatch ID with a different durable event is unsafe to retry."""
+
+
+def _parse_event(body: str) -> dict[str, object] | None:
     prefix = "<!-- adk-event:v1\n"
     if not body.startswith(prefix):
         return False
     try:
         encoded = body[len(prefix) :].split("\n-->", maxsplit=1)[0]
-        event = json.loads(encoded)
+        event: dict[str, object] = json.loads(encoded)
         UUID(event["event_id"])
         UUID(event["dispatch_id"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return event.get("kind") == "dispatch.claimed" and event["dispatch_id"] == dispatch_id
+        return None
+    if event.get("schema_version") != 1 or not isinstance(event.get("payload"), dict):
+        return None
+    return event
+
+
+def _is_matching_claim_event(body: str, dispatch_id: str) -> bool:
+    event = _parse_event(body)
+    return event is not None and event.get("kind") == "dispatch.claimed" and event["dispatch_id"] == dispatch_id

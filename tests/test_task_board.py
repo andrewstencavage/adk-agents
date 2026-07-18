@@ -65,6 +65,7 @@ def ready_story() -> ProjectStory:
         labels=frozenset({"adk:story"}),
         status_option_id="ready",
         updated_at="2026-07-17T12:00:00+00:00",
+        status_version="updated-at:2026-07-17T12:00:00+00:00",
         primary_specialist="Research",
     )
 
