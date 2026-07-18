@@ -108,9 +108,16 @@ class GitHubProjectReader:
         self._issues: dict[str, int] = {}
 
     def list_ready_stories(self) -> list[ProjectStory]:
-        response = self._graphql.execute(_PROJECT_ITEMS_QUERY, {"project": self._config.project_id})
-        nodes = response["data"]["node"]["items"]["nodes"]
-        stories = [self._story(item) for item in nodes]
+        cursor: str | None = None
+        stories: list[ProjectStory | None] = []
+        while True:
+            response = self._graphql.execute(_PROJECT_ITEMS_QUERY, {"project": self._config.project_id, "after": cursor})
+            items = response["data"]["node"]["items"]
+            stories.extend(self._story(item) for item in items["nodes"])
+            page = items.get("pageInfo", {"hasNextPage": False})
+            if not page["hasNextPage"]:
+                break
+            cursor = page["endCursor"]
         return [story for story in stories if story is not None and story.status_option_id == self._config.ready_option_id and story.primary_specialist]
 
     def get_story(self, project_item_id: str) -> ProjectStory:
@@ -161,7 +168,7 @@ class GitHubTaskBoardGateway:
         self._writer.set_status(project_item_id, option_id)
 
 
-_PROJECT_ITEMS_QUERY = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { items(first: 100) { nodes { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } } } }"""
+_PROJECT_ITEMS_QUERY = """query($project: ID!, $after: String) { node(id: $project) { ... on ProjectV2 { items(first: 100, after: $after) { nodes { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } pageInfo { hasNextPage endCursor } } } } } }"""
 
 _PROJECT_ITEM_QUERY = """query($item: ID!) { node(id: $item) { ... on ProjectV2Item { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } }"""
 

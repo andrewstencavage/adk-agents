@@ -13,7 +13,7 @@ class FakeGraphQL:
                 {"field": {"id": "dispatch-field", "name": "Dispatch ID"}, "text": "existing-dispatch"},
             ]}},
             {"id": "item-2", "updatedAt": "2026-07-18T00:00:00Z", "content": {"id": "issue-2", "number": 16, "closed": False, "labels": {"nodes": [{"name": "adk:story"}]}}, "fieldValues": {"nodes": [{"field": {"name": "Status"}, "optionId": "blocked"}]}}
-        ]}}}}
+        ], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
 
 
 def test_reader_returns_only_open_managed_ready_story_candidates():
@@ -24,6 +24,25 @@ def test_reader_returns_only_open_managed_ready_story_candidates():
     assert stories[0].issue_number == 15
     assert stories[0].primary_specialist == "Research"
     assert stories[0].dispatch_id == "existing-dispatch"
+
+
+def test_reader_pages_until_every_ready_story_is_observed():
+    def item(number):
+        return {"id": f"item-{number}", "updatedAt": "now", "content": {"id": f"issue-{number}", "number": number, "closed": False, "labels": {"nodes": [{"name": "adk:story"}]}}, "fieldValues": {"nodes": [{"field": {"id": "status", "name": "Status"}, "optionId": "ready"}, {"field": {"id": "primary", "name": "Primary Specialist"}, "name": "Research"}]}}
+
+    class PagedGraphQL:
+        def __init__(self): self.calls = []
+        def execute(self, _query, variables):
+            self.calls.append(variables)
+            if variables["after"] is None:
+                return {"data": {"node": {"items": {"nodes": [item(1)], "pageInfo": {"hasNextPage": True, "endCursor": "next"}}}}}
+            return {"data": {"node": {"items": {"nodes": [item(2)], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+
+    graphql = PagedGraphQL()
+    stories = GitHubProjectReader(BoardConfig("project", "owner", "repo", "ready", "progress", "blocked"), graphql).list_ready_stories()
+
+    assert [story.issue_number for story in stories] == [1, 2]
+    assert graphql.calls == [{"project": "project", "after": None}, {"project": "project", "after": "next"}]
 
 
 class RecordingGraphQL:
