@@ -10,6 +10,18 @@ from dataclasses import dataclass
 from typing import Callable
 
 
+class PythonCommandProfile:
+    """Exact argv allowlist for non-network Python checks, executed by a host runner."""
+
+    def __init__(self, approved: tuple[tuple[str, ...], ...], runner: Callable[[tuple[str, ...]], str]) -> None:
+        self._approved, self._runner = approved, runner
+
+    def run(self, argv: tuple[str, ...]) -> str:
+        if argv not in self._approved:
+            raise PermissionError("command is outside the approved Python profile")
+        return self._runner(argv)
+
+
 @dataclass(frozen=True)
 class ScopeResult:
     blocked: bool
@@ -62,11 +74,29 @@ class ReviewOutcome:
     pr_ref: str | None = None
 
 
+class TransientCheckFailure(RuntimeError):
+    """A runner/service failure eligible for exactly one automatic retry."""
+
+
 class ReviewService:
     """Read-only review gate; its PR payload explicitly has no approval authority."""
 
     def __init__(self, create_pr: Callable[[dict[str, object]], str], *, max_corrections: int = 2) -> None:
-        self._create_pr, self._max_corrections, self._corrections = create_pr, max_corrections, 0
+        self._create_pr, self._max_corrections, self._corrections, self._transient_retried = create_pr, max_corrections, 0, False
+
+    def check(self, run_check: Callable[[], object]) -> ReviewOutcome:
+        try:
+            run_check()
+            return ReviewOutcome()
+        except TransientCheckFailure:
+            if self._transient_retried:
+                return ReviewOutcome(blocked=True)
+            self._transient_retried = True
+            try:
+                run_check()
+                return ReviewOutcome()
+            except TransientCheckFailure:
+                return ReviewOutcome(blocked=True)
 
     def review(self, *, read_only: bool, findings: list[ReviewFinding], story_ref: str = "", branch: str = "", commits: tuple[str, ...] = (), checks: tuple[str, ...] = ()) -> ReviewOutcome:
         if not read_only:

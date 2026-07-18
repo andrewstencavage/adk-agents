@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from adk_agents.ready_workflows import (
     CodingSession,
     BackupService,
@@ -10,6 +12,8 @@ from adk_agents.ready_workflows import (
     ReviewFinding,
     ReviewService,
     StoryHandoff,
+    PythonCommandProfile,
+    TransientCheckFailure,
 )
 
 
@@ -22,6 +26,18 @@ def test_coding_session_blocks_out_of_scope_change_and_commit_authority_only_com
 
     assert authority.commit(session) == "abc123"
     assert committed == [("src/feature.py",)]
+
+
+def test_python_command_profile_rejects_git_network_and_package_install_without_invoking_runner():
+    calls: list[tuple[str, ...]] = []
+    profile = PythonCommandProfile((("pytest",),), lambda argv: calls.append(argv) or "passed")
+
+    assert profile.run(("pytest",)) == "passed"
+    with pytest.raises(PermissionError):
+        profile.run(("git", "status"))
+    with pytest.raises(PermissionError):
+        profile.run(("pip", "install", "x"))
+    assert calls == [("pytest",)]
 
 
 def test_review_requires_read_only_checkout_and_only_creates_pr_after_acceptance():
@@ -44,6 +60,20 @@ def test_review_blocks_after_two_corrections_and_reports_actionable_findings():
     assert service.review(read_only=True, findings=[finding]).needs_revision
     assert service.review(read_only=True, findings=[finding]).needs_revision
     assert service.review(read_only=True, findings=[finding]).blocked
+
+
+def test_review_retries_one_transient_check_failure_then_blocks_a_repeat():
+    service = ReviewService(lambda _body: "never")
+    attempts = 0
+
+    def succeeds_on_retry():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TransientCheckFailure()
+
+    assert service.check(succeeds_on_retry).needs_revision is False
+    assert service.check(lambda: (_ for _ in ()).throw(TransientCheckFailure())).blocked
 
 
 def test_incident_service_deduplicates_persistent_failures_and_closes_only_after_24_hours():
