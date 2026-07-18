@@ -55,6 +55,10 @@ _MIGRATION_8_STATEMENTS = (
     "CREATE TABLE board_dispatch (dispatch_id TEXT PRIMARY KEY, project_item_id TEXT NOT NULL, ready_generation INTEGER NOT NULL, event_id TEXT, occurred_at TEXT, comment_id TEXT, comment_digest TEXT, confirmed INTEGER NOT NULL DEFAULT 0, UNIQUE(project_item_id, ready_generation))",
 )
 _MIGRATION_8 = "\n".join(_MIGRATION_8_STATEMENTS)
+_MIGRATION_9_STATEMENTS = (
+    "CREATE TABLE manager_admission_trace (trace_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, dispatch_id TEXT, specialist TEXT, decision TEXT NOT NULL CHECK(decision IN ('accepted', 'denied')), request_digest TEXT NOT NULL, result_digest TEXT, error_class TEXT)",
+)
+_MIGRATION_9 = "\n".join(_MIGRATION_9_STATEMENTS)
 
 
 class OperationalRecord:
@@ -68,7 +72,7 @@ class OperationalRecord:
         with self.connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migration (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)")
-            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4), (5, _MIGRATION_5_STATEMENTS, _MIGRATION_5), (6, _MIGRATION_6_STATEMENTS, _MIGRATION_6), (7, _MIGRATION_7_STATEMENTS, _MIGRATION_7), (8, _MIGRATION_8_STATEMENTS, _MIGRATION_8)):
+            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4), (5, _MIGRATION_5_STATEMENTS, _MIGRATION_5), (6, _MIGRATION_6_STATEMENTS, _MIGRATION_6), (7, _MIGRATION_7_STATEMENTS, _MIGRATION_7), (8, _MIGRATION_8_STATEMENTS, _MIGRATION_8), (9, _MIGRATION_9_STATEMENTS, _MIGRATION_9)):
                 checksum = hashlib.sha256(migration.encode()).hexdigest()
                 existing = connection.execute("SELECT checksum FROM schema_migration WHERE version = ?", (version,)).fetchone()
                 if existing is not None and existing[0] != checksum:
@@ -111,7 +115,7 @@ class OperationalRecord:
         foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         triggers = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
-        required_tables = {"schema_migration", "artifact_manifest", "evidence_ledger", "cleanup_run", "model_assessment", "model_selection", "model_outcome", "dispatch", "invocation_trace", "poll_checkpoint", "polling_lease", "board_observation", "board_dispatch", "operational_incident", "story_handoff"}
+        required_tables = {"schema_migration", "artifact_manifest", "evidence_ledger", "cleanup_run", "model_assessment", "model_selection", "model_outcome", "dispatch", "invocation_trace", "poll_checkpoint", "polling_lease", "board_observation", "board_dispatch", "manager_admission_trace", "operational_incident", "story_handoff"}
         required_triggers = {"evidence_ledger_append_only", "evidence_ledger_no_delete"}
         if integrity != "ok" or foreign_keys or not required_tables <= tables or not required_triggers <= triggers:
             raise RecordIntegrityError("SQLite integrity safeguards failed")

@@ -28,21 +28,6 @@ class TraceStore:
         self._record = OperationalRecord(self._path)
         self._record.startup()
         self._ledger = EvidenceLedger(self._record)
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS manager_admission_trace (
-                    trace_id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    dispatch_id TEXT,
-                    specialist TEXT,
-                    decision TEXT NOT NULL CHECK(decision IN ('accepted', 'denied')),
-                    request_digest TEXT NOT NULL,
-                    result_digest TEXT,
-                    error_class TEXT
-                )
-                """
-            )
 
     def record(
         self,

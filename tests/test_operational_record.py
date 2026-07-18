@@ -12,7 +12,7 @@ def test_startup_applies_forward_migrations_and_enables_integrity_safeguards(tmp
         migration_versions = connection.execute(
             "SELECT version FROM schema_migration ORDER BY version"
         ).fetchall()
-        assert [row[0] for row in migration_versions] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert [row[0] for row in migration_versions] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'dispatch'").fetchone()
