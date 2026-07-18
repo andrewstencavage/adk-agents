@@ -1,0 +1,23 @@
+[Unit]
+Description=ADK agents local service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=adk-agents
+Group=adk-agents
+WorkingDirectory=/var/lib/adk-agents
+ExecStart=/var/lib/adk-agents/venv/bin/python -m adk_agents.service
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=600
+StartLimitBurst=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/adk-agents
+
+[Install]
+WantedBy=multi-user.target

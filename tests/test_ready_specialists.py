@@ -23,6 +23,15 @@ def test_research_retries_only_rate_limits_and_returns_cited_uncertain_report():
     assert calls == 2
 
 
+def test_research_emits_a_redacted_evidence_reference_through_its_typed_writer():
+    report = ResearchSpecialist(
+        lambda _question: [SearchHit("A claim", "https://example.test/source")],
+        evidence_writer=lambda payload: "sha256:" + str(len(payload)),
+    ).research("bounded question")
+
+    assert report.evidence_refs == ("sha256:3",)
+
+
 def test_coding_boundary_reports_a_scope_gap_without_running_an_unapproved_command(tmp_path):
     boundary = CodingBoundary(tmp_path, approved_paths=("src",), approved_commands=("pytest",))
 

@@ -24,6 +24,7 @@ class CitedClaim:
 class ResearchReport:
     claims: tuple[CitedClaim, ...]
     uncertainty: str
+    evidence_refs: tuple[str, ...] = ()
 
 
 class RateLimited(RuntimeError):
@@ -33,14 +34,16 @@ class RateLimited(RuntimeError):
 class ResearchSpecialist:
     """Uses only the injected typed search adapter; no browser or shell capability."""
 
-    def __init__(self, search: Callable[[str], Iterable[SearchHit]], *, max_attempts: int = 2, retry_delay_seconds: float = 0, wait: Callable[[float], None] = sleep) -> None:
-        self._search, self._max_attempts, self._retry_delay_seconds, self._wait = search, max_attempts, retry_delay_seconds, wait
+    def __init__(self, search: Callable[[str], Iterable[SearchHit]], *, max_attempts: int = 2, retry_delay_seconds: float = 0, wait: Callable[[float], None] = sleep, evidence_writer: Callable[[object], str] | None = None) -> None:
+        self._search, self._max_attempts, self._retry_delay_seconds, self._wait, self._evidence_writer = search, max_attempts, retry_delay_seconds, wait, evidence_writer
 
     def research(self, question: str) -> ResearchReport:
         for attempt in range(self._max_attempts):
             try:
                 hits = tuple(self._search(question))
-                return ResearchReport(tuple(CitedClaim(hit.claim, hit.source_url) for hit in hits), "Sources may be incomplete.")
+                claims = tuple(CitedClaim(hit.claim, hit.source_url) for hit in hits)
+                evidence_refs = () if self._evidence_writer is None else (self._evidence_writer({"question": question, "claims": claims, "uncertainty": "Sources may be incomplete."}),)
+                return ResearchReport(claims, "Sources may be incomplete.", evidence_refs)
             except RateLimited:
                 if attempt + 1 == self._max_attempts:
                     raise RuntimeError("research rate-limit retry policy exhausted") from None
