@@ -123,6 +123,16 @@ def test_router_enforces_the_role_threshold_with_a_mocked_local_inventory(tmp_pa
         router.select(RouteRequest(dispatch_id="dispatch-0001", role=SpecialistType.RESEARCH), [model()])
 
 
+def test_router_blocks_a_stale_passing_assessment(tmp_path):
+    record = OperationalRecord(tmp_path / "record.sqlite3")
+    record.startup()
+    router = ModelRouter(record, suite_version="2026.1", max_assessment_age=timedelta(seconds=0))
+    router.record_assessment(assessment(SpecialistType.RESEARCH))
+
+    with pytest.raises(NoEligibleModel, match="eligible"):
+        router.select(RouteRequest(dispatch_id="dispatch-0001", role=SpecialistType.RESEARCH), [model()])
+
+
 def test_manager_returns_a_visible_blocked_story_when_nothing_is_eligible(tmp_path):
     record = OperationalRecord(tmp_path / "routing.sqlite3")
     record.startup()

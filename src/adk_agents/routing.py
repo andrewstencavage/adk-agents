@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from .contracts import SpecialistType
@@ -61,8 +61,8 @@ class NoEligibleModel(RuntimeError):
 
 
 class ModelRouter:
-    def __init__(self, record: OperationalRecord, *, suite_version: str) -> None:
-        self._record, self._suite_version = record, suite_version
+    def __init__(self, record: OperationalRecord, *, suite_version: str, max_assessment_age: timedelta = timedelta(days=30)) -> None:
+        self._record, self._suite_version, self._max_assessment_age = record, suite_version, max_assessment_age
         self._ledger = EvidenceLedger(record)
 
     def record_assessment(self, assessment: ModelAssessment) -> None:
@@ -93,7 +93,10 @@ class ModelRouter:
 
     def _passes_current_suite(self, model: ModelRef, role: SpecialistType) -> bool:
         row = self._latest_assessment(model, role)
-        return row is not None and row["status"] == AssessmentStatus.PASSED.value and float(row["score"]) >= _ROLE_THRESHOLDS[role]
+        if row is None:
+            return False
+        completed_at = datetime.fromisoformat(row["completed_at"])
+        return row["status"] == AssessmentStatus.PASSED.value and float(row["score"]) >= _ROLE_THRESHOLDS[role] and datetime.now(timezone.utc) - completed_at <= self._max_assessment_age
 
     def _score(self, model: ModelRef, role: SpecialistType) -> float:
         row = self._latest_assessment(model, role)
@@ -101,7 +104,7 @@ class ModelRouter:
 
     def _latest_assessment(self, model: ModelRef, role: SpecialistType):
         with self._record.connection() as connection:
-            return connection.execute("SELECT status, score FROM model_assessment WHERE suite_version = ? AND runtime_id = ? AND model_id = ? AND fingerprint = ? AND runtime_version = ? AND role = ? ORDER BY completed_at DESC LIMIT 1", (self._suite_version, model.runtime_id, model.model_id, model.fingerprint, model.runtime_version, role.value)).fetchone()
+            return connection.execute("SELECT status, score, completed_at FROM model_assessment WHERE suite_version = ? AND runtime_id = ? AND model_id = ? AND fingerprint = ? AND runtime_version = ? AND role = ? ORDER BY completed_at DESC LIMIT 1", (self._suite_version, model.runtime_id, model.model_id, model.fingerprint, model.runtime_version, role.value)).fetchone()
 
     def _record_block(self, request: RouteRequest, reason: str) -> str:
         evidence_ref = _digest({"dispatch_id": request.dispatch_id, "role": request.role.value, "reason": reason})
