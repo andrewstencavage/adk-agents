@@ -123,6 +123,14 @@ class DispatchStore:
                 INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (1, CURRENT_TIMESTAMP);
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(board_dispatch)")}
+            if "source_status_version" not in columns:
+                connection.execute(
+                    "ALTER TABLE board_dispatch ADD COLUMN source_status_version TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (2, CURRENT_TIMESTAMP)"
+            )
 
     def prepare(self, story: ProjectStory, ready_option_id: str) -> Dispatch | None:
         """Persist/reuse intent, incrementing generation only on a Ready edge."""
@@ -288,6 +296,15 @@ class DispatchStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM board_lease WHERE lease_name = 'claim' AND owner_id = ?", (owner_id,))
 
+    def renew_lease(self, owner_id: str, ttl_seconds: int = 60) -> None:
+        with self._connect() as connection:
+            updated = connection.execute(
+                "UPDATE board_lease SET expires_at = ? WHERE lease_name = 'claim' AND owner_id = ?",
+                (time.time() + ttl_seconds, owner_id),
+            ).rowcount
+        if updated != 1:
+            raise RuntimeError("claim lease was lost")
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
         connection.row_factory = sqlite3.Row
@@ -337,6 +354,7 @@ class TaskBoardAdapter:
         dispatch = self._store.prepare(candidate, self._config.ready_option_id)
         if dispatch is None:
             return None
+        self._store.renew_lease(self._lease_owner)
         current = self._gateway.get_story(candidate.project_item_id)
         if not self._is_ready_story(current):
             self._store.supersede(dispatch.dispatch_id)
@@ -346,6 +364,7 @@ class TaskBoardAdapter:
             comment = self._store.claim_event(dispatch.dispatch_id, current)
             existing = self._find_claim_comment(current.issue_node_id, dispatch.dispatch_id, current.project_item_id)
             if existing is None:
+                self._store.renew_lease(self._lease_owner)
                 comment_id = self._gateway.add_comment(current.issue_node_id, comment)
                 comment_body = comment
             else:
@@ -362,9 +381,11 @@ class TaskBoardAdapter:
             self._store.supersede(dispatch.dispatch_id)
             return None
         if current.dispatch_id != dispatch.dispatch_id:
+            self._store.renew_lease(self._lease_owner)
             self._gateway.set_dispatch_id(candidate.project_item_id, dispatch.dispatch_id)
         current = self._gateway.get_story(candidate.project_item_id)
         if self._is_ready_story(current):
+            self._store.renew_lease(self._lease_owner)
             self._gateway.set_status(candidate.project_item_id, self._config.in_progress_option_id)
         final = self._gateway.get_story(candidate.project_item_id)
         if (
@@ -373,6 +394,16 @@ class TaskBoardAdapter:
         ):
             self._store.confirm(dispatch.dispatch_id)
             return dispatch
+        if self._belongs_to_configured_board(final) and final.status_option_id in {
+            self._config.ready_option_id,
+            self._config.in_progress_option_id,
+        }:
+            self._store.renew_lease(self._lease_owner)
+            self._gateway.add_comment(
+                final.issue_node_id,
+                "## Agent update · Blocked\n\nClaim reconciliation failed; human review is required.",
+            )
+            self._gateway.set_status(final.project_item_id, self._config.blocked_option_id)
         return None
 
     def _is_ready_story(self, story: ProjectStory) -> bool:
