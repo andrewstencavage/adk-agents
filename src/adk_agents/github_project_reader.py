@@ -55,6 +55,27 @@ class GitHubProjectFieldWriter:
         self._graphql.execute(_UPDATE_PROJECT_FIELD_MUTATION, {"project": self._project_id, "item": project_item_id, "field": field_id, "value": value})
 
 
+class GitHubIssueBodyReader:
+    """Read only the issue body required for the explicit dispatch contract."""
+
+    def __init__(self, token: str, owner: str, repository: str) -> None:
+        self._token, self._owner, self._repository = token, owner, repository
+
+    def body(self, issue_number: int) -> str:
+        if issue_number < 1:
+            raise ValueError("issue number must be positive")
+        request = Request(
+            f"https://api.github.com/repos/{self._owner}/{self._repository}/issues/{issue_number}",
+            headers={"Authorization": f"Bearer {self._token}", "Accept": "application/vnd.github+json"},
+        )
+        with urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+        body = payload.get("body")
+        if not isinstance(body, str):
+            raise ValueError("GitHub issue has no textual body")
+        return body
+
+
 class GitHubProjectReader:
     def __init__(self, config: BoardConfig, graphql: GraphQLTransport) -> None:
         self._config, self._graphql = config, graphql
