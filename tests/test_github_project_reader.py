@@ -1,6 +1,9 @@
+import json
+
 import pytest
 
-from adk_agents.github_project_reader import GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway
+from adk_agents.github_project_reader import GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway
+import adk_agents.github_project_reader as project_reader_module
 from adk_agents.task_board import BoardComment, BoardConfig, ProjectStory
 
 
@@ -99,3 +102,28 @@ def test_concrete_gateway_composes_pinned_project_and_issue_operations():
     gateway.set_dispatch_id("item", "dispatch")
     gateway.set_status("item", "progress")
     assert writer.calls == [("item", "dispatch"), ("item", "progress")]
+
+
+def test_issue_comment_reader_follows_github_next_page_links(monkeypatch):
+    payloads = [
+        ([{"id": 1, "body": "first"}], '<https://api.github.com/repos/owner/repo/issues/15/comments?page=2>; rel="next"'),
+        ([{"id": 2, "body": "second"}], None),
+    ]
+
+    class Response:
+        def __init__(self, payload, link):
+            self._payload, self.headers = payload, {"Link": link} if link else {}
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return json.dumps(self._payload).encode()
+
+    calls = []
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        return Response(*payloads.pop(0))
+    monkeypatch.setattr(project_reader_module, "urlopen", fake_urlopen)
+
+    comments = GitHubIssueComments("token", "owner", "repo").list(15)
+
+    assert [comment.body for comment in comments] == ["first", "second"]
+    assert calls[1][0].endswith("page=2")

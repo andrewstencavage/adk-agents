@@ -83,13 +83,18 @@ class GitHubIssueComments:
         self._token, self._owner, self._repository = token, owner, repository
 
     def list(self, issue_number: int) -> list[BoardComment]:
-        request = Request(
-            f"https://api.github.com/repos/{self._owner}/{self._repository}/issues/{issue_number}/comments",
-            headers={"Authorization": f"Bearer {self._token}", "Accept": "application/vnd.github+json"},
-        )
-        with urlopen(request, timeout=30) as response:
-            payload = json.load(response)
-        return [BoardComment(str(comment["id"]), comment["body"]) for comment in payload]
+        next_url = f"https://api.github.com/repos/{self._owner}/{self._repository}/issues/{issue_number}/comments"
+        comments: list[BoardComment] = []
+        while next_url:
+            request = Request(
+                next_url,
+                headers={"Authorization": f"Bearer {self._token}", "Accept": "application/vnd.github+json"},
+            )
+            with urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+                next_url = _next_link(response.headers.get("Link"))
+            comments.extend(BoardComment(str(comment["id"]), comment["body"]) for comment in payload)
+        return comments
 
     def add(self, issue_number: int, body: str) -> str:
         request = Request(
@@ -173,3 +178,13 @@ _PROJECT_ITEMS_QUERY = """query($project: ID!, $after: String) { node(id: $proje
 _PROJECT_ITEM_QUERY = """query($item: ID!) { node(id: $item) { ... on ProjectV2Item { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } }"""
 
 _UPDATE_PROJECT_FIELD_MUTATION = """mutation($project: ID!, $item: ID!, $field: ID!, $value: ProjectV2FieldValue!) { updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: $value}) { projectV2Item { id } } }"""
+
+
+def _next_link(header: str | None) -> str | None:
+    if not header:
+        return None
+    for part in header.split(","):
+        url, separator, relation = part.strip().partition("; rel=\"next\"")
+        if separator and url.startswith("<") and url.endswith(">"):
+            return url[1:-1]
+    return None
