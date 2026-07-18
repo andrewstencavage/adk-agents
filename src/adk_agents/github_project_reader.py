@@ -103,8 +103,8 @@ class GitHubIssueComments:
 
 
 class GitHubProjectReader:
-    def __init__(self, config: BoardConfig, graphql: GraphQLTransport) -> None:
-        self._config, self._graphql = config, graphql
+    def __init__(self, config: BoardConfig, graphql: GraphQLTransport, *, dispatch_field_id: str | None = None) -> None:
+        self._config, self._graphql, self._dispatch_field_id = config, graphql, dispatch_field_id
         self._issues: dict[str, int] = {}
 
     def list_ready_stories(self) -> list[ProjectStory]:
@@ -125,10 +125,12 @@ class GitHubProjectReader:
         if not issue or issue.get("closed") or "adk:story" not in {label["name"] for label in issue.get("labels", {}).get("nodes", [])}:
             return None
         values = {value.get("field", {}).get("name"): value for value in item["fieldValues"]["nodes"]}
+        values_by_id = {value.get("field", {}).get("id"): value for value in item["fieldValues"]["nodes"]}
         status = values.get("Status", {}).get("optionId")
         primary = values.get("Primary Specialist", {}).get("name")
+        dispatch = values_by_id.get(self._dispatch_field_id, {}).get("text")
         self._issues[issue["id"]] = issue["number"]
-        return ProjectStory(self._config.project_id, self._config.owner, self._config.repository, item["id"], issue["id"], issue["number"], True, frozenset({"adk:story"}), status, item["updatedAt"], item["updatedAt"], primary)
+        return ProjectStory(self._config.project_id, self._config.owner, self._config.repository, item["id"], issue["id"], issue["number"], True, frozenset({"adk:story"}), status, item["updatedAt"], item["updatedAt"], primary, dispatch)
 
     def issue_number(self, issue_node_id: str) -> int:
         try:
@@ -159,8 +161,8 @@ class GitHubTaskBoardGateway:
         self._writer.set_status(project_item_id, option_id)
 
 
-_PROJECT_ITEMS_QUERY = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { items(first: 100) { nodes { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { name } } optionId name } } } } } } } }"""
+_PROJECT_ITEMS_QUERY = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { items(first: 100) { nodes { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } } } }"""
 
-_PROJECT_ITEM_QUERY = """query($item: ID!) { node(id: $item) { ... on ProjectV2Item { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { name } } optionId name } } } } } }"""
+_PROJECT_ITEM_QUERY = """query($item: ID!) { node(id: $item) { ... on ProjectV2Item { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } }"""
 
 _UPDATE_PROJECT_FIELD_MUTATION = """mutation($project: ID!, $item: ID!, $field: ID!, $value: ProjectV2FieldValue!) { updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: $value}) { projectV2Item { id } } }"""
