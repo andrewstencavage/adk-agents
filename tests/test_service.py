@@ -59,7 +59,7 @@ def test_mock_polling_loop_never_supplies_a_candidate(monkeypatch):
 def test_assessment_gated_manager_has_no_eligible_model_before_assessment(tmp_path):
     record = service_module.OperationalRecord(tmp_path / "record.sqlite3")
     record.startup()
-    manager = build_assessment_gated_manager(record, tmp_path)
+    manager = build_assessment_gated_manager(record)
 
     task = {
         "control_issue_ref": "#1", "story_ref": "#20", "dispatch_id": "dispatch-0001",

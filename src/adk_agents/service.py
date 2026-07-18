@@ -26,7 +26,7 @@ def build_mock_manager(data_dir: Path) -> Manager:
     return Manager(TraceStore(data_dir / "record.sqlite3"), handlers)
 
 
-def build_assessment_gated_manager(record: OperationalRecord, data_dir: Path) -> Manager:
+def build_assessment_gated_manager(record: OperationalRecord) -> Manager:
     """Create the static specialist registry behind an empty assessed inventory.
 
     No local model becomes eligible merely because the service is installed.
@@ -34,7 +34,7 @@ def build_assessment_gated_manager(record: OperationalRecord, data_dir: Path) ->
     supplied a current exact-fingerprint candidate.
     """
     handlers = {role.value: accepted_result for role in SpecialistType}
-    return Manager(TraceStore(data_dir / "manager.sqlite3"), handlers, router=ModelRouter(record, suite_version="2026.1"), inventory=lambda: [])
+    return Manager(TraceStore(record.path), handlers, router=ModelRouter(record, suite_version="2026.1"), inventory=lambda: [])
 
 
 def build_task_for(issue_body_reader):
@@ -79,7 +79,7 @@ def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) 
     board = TaskBoardAdapter(board_config, gateway, DispatchStore(record.path))
     workflow = ApprovedStoryWorkflow(EvidenceLedger(record), lambda _event: None)
     polling = build_polling_service(
-        board, build_assessment_gated_manager(record, config.data_dir), workflow, reader,
+        board, build_assessment_gated_manager(record), workflow, reader,
         GitHubIssueBodyReader(issues_token, board_config.owner, board_config.repository),
     )
     return LeasedPollingWorker(polling, PollingLease(record, project_id=board_config.project_id, owner_id=uuid7()))
