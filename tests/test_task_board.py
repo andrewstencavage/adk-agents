@@ -99,6 +99,21 @@ def test_restart_reuses_intent_and_does_not_duplicate_claim_comment(tmp_path):
     assert gateway.status_writes == ["in-progress"]
 
 
+def test_user_comment_with_only_a_dispatch_id_cannot_satisfy_claim_reconciliation(tmp_path):
+    gateway = FakeBoardGateway(ready_story())
+    database = tmp_path / "record.sqlite3"
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(database))
+    prepared = DispatchStore(database).prepare(gateway.story, "ready")
+    assert prepared is not None
+    gateway.comments.append(BoardComment("user-comment", '{"dispatch_id":"' + prepared.dispatch_id + '"}'))
+
+    claimed = adapter.claim_ready_story(gateway.story)
+
+    assert claimed == prepared
+    assert len(gateway.comments) == 2
+    assert "dispatch.claimed" in gateway.comments[-1].body
+
+
 def test_user_movement_away_from_ready_before_claim_prevents_all_writes(tmp_path):
     gateway = FakeBoardGateway(ready_story())
     adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "record.sqlite3"))

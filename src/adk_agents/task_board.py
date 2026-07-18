@@ -185,7 +185,7 @@ class TaskBoardAdapter:
                     (
                         comment.comment_id
                         for comment in self._gateway.list_comments(current.issue_node_id)
-                        if f'"dispatch_id":"{dispatch.dispatch_id}"' in comment.body
+                        if _is_claim_comment(comment.body, dispatch, current)
                     ),
                     None,
                 )
@@ -240,6 +240,29 @@ def _claim_comment(dispatch: Dispatch, story: ProjectStory) -> str:
         "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
     }
     return "<!-- adk-event:v1\n" + json.dumps(event, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
+
+
+def _is_claim_comment(body: str, dispatch: Dispatch, story: ProjectStory) -> bool:
+    """Accept only the exact structured claim envelope, never a user substring."""
+    prefix = "<!-- adk-event:v1\n"
+    if not body.startswith(prefix):
+        return False
+    encoded, marker, _summary = body[len(prefix):].partition("\n-->")
+    if not marker:
+        return False
+    try:
+        event = json.loads(encoded)
+    except json.JSONDecodeError:
+        return False
+    return (
+        isinstance(event, dict)
+        and event.get("kind") == "dispatch.claimed"
+        and event.get("schema_version") == 1
+        and event.get("dispatch_id") == dispatch.dispatch_id
+        and event.get("payload") == {"project_item_id": story.project_item_id, "status": "In Progress"}
+        and isinstance(event.get("event_id"), str)
+        and isinstance(event.get("occurred_at"), str)
+    )
 
 
 def _blocked_comment(dispatch: Dispatch, story: ProjectStory, summary: str) -> str:
