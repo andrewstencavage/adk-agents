@@ -27,8 +27,15 @@ class ApprovedStoryWorkflow:
         return self._ledger.append(action_type="story.dispatch", dispatch_id=dispatch_id, input_value=request, outcome_class="started")
 
     def handoff(self, dispatch_id: str, status: str, result: Any) -> str:
+        with self._record.connection() as connection:
+            existing = connection.execute("SELECT event_id, delivered FROM story_handoff WHERE dispatch_id = ? AND status = ?", (dispatch_id, status)).fetchone()
+            if existing is not None:
+                return existing["event_id"]
         event_id = self._ledger.append(action_type="story.handoff", dispatch_id=dispatch_id, output_value=result, outcome_class=status)
         with self._record.connection() as connection:
+            connection.execute("INSERT INTO story_handoff(dispatch_id, status, event_id, delivered, created_at) VALUES (?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))", (dispatch_id, status, event_id))
             connection.execute("UPDATE dispatch SET local_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE dispatch_id = ?", (status, dispatch_id))
         self._board_handoff({"dispatch_id": dispatch_id, "status": status, "event_id": event_id})
+        with self._record.connection() as connection:
+            connection.execute("UPDATE story_handoff SET delivered = 1 WHERE event_id = ?", (event_id,))
         return event_id

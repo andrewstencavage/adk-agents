@@ -15,6 +15,7 @@ def test_approved_story_records_redacted_dispatch_and_handoff_across_restart(tmp
     workflow.dispatch("dispatch-0001", "#19", {"credential": "do-not-store"})
     restarted = ApprovedStoryWorkflow(EvidenceLedger(record), board_events.append)
     restarted.handoff("dispatch-0001", "completed", {"raw": "do-not-store"})
+    restarted.handoff("dispatch-0001", "completed", {"raw": "do-not-store"})
 
     with record.connection() as connection:
         rows = connection.execute("SELECT action_type, input_digest, output_digest FROM evidence_ledger").fetchall()
