@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -99,3 +99,14 @@ def test_backup_service_uses_external_snapshot_and_isolated_monthly_restore():
     assert copied == ["record.sqlite3"]
     assert service.monthly_restore_verify("backup:record.sqlite3") is True
     assert verified == ["backup:record.sqlite3"]
+
+
+def test_backup_retention_keeps_14_daily_and_12_monthly_sets():
+    service = BackupService(lambda _path: None, lambda _ref: None)
+    now = datetime.now(timezone.utc)
+    for days in range(16):
+        service.record_set(f"daily-{days}", "daily", now - timedelta(days=days))
+    for months in range(14):
+        service.record_set(f"monthly-{months}", "monthly", now - timedelta(days=31 * months))
+
+    assert set(service.expired(now)) == {"daily-14", "daily-15", "monthly-12", "monthly-13"}

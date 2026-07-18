@@ -7,6 +7,7 @@ shell, or systemd access is embedded in a specialist.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 
@@ -148,6 +149,7 @@ class BackupService:
 
     def __init__(self, copy_to_external: Callable[[str], None], verify_isolated_restore: Callable[[str], None]) -> None:
         self._copy, self._verify = copy_to_external, verify_isolated_restore
+        self._sets: list[tuple[str, str, datetime]] = []
 
     def daily_backup(self, record_path: str) -> str:
         self._copy(record_path)
@@ -156,3 +158,13 @@ class BackupService:
     def monthly_restore_verify(self, backup_ref: str) -> bool:
         self._verify(backup_ref)
         return True
+
+    def record_set(self, backup_ref: str, cadence: str, created_at: datetime) -> None:
+        if cadence not in {"daily", "monthly"}:
+            raise ValueError("backup cadence must be daily or monthly")
+        self._sets.append((backup_ref, cadence, created_at))
+
+    def expired(self, now: datetime) -> tuple[str, ...]:
+        limits = {"daily": 14, "monthly": 12}
+        grouped = {cadence: sorted((item for item in self._sets if item[1] == cadence), key=lambda item: item[2], reverse=True) for cadence in limits}
+        return tuple(item[0] for cadence, items in grouped.items() for item in items[limits[cadence]:])
