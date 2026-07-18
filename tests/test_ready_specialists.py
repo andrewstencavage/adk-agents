@@ -4,6 +4,8 @@ from adk_agents.contracts import SpecialistType
 from adk_agents.specialists import CodingBoundary, RateLimited, ResearchSpecialist, SearchHit
 from adk_agents.workflow import ReviewGate, ReviewStatus
 from adk_agents.operations import IncidentTracker, ServicePolicy
+from adk_agents.operations import PersistentIncidentTracker
+from adk_agents.operational_record import OperationalRecord
 
 
 def test_research_retries_only_rate_limits_and_returns_cited_uncertain_report():
@@ -62,3 +64,16 @@ def test_operational_incident_is_deduplicated_after_three_failures_and_closes_af
     assert incidents.record_failure("backup") == incident
     assert incidents.record_recovery("backup", healthy_hours=24) == incident
     assert ServicePolicy().restart_delay_seconds == 10
+
+
+def test_persistent_incident_survives_restart_without_a_duplicate_publish(tmp_path):
+    record = OperationalRecord(tmp_path / "record.sqlite3")
+    record.startup()
+    published: list[tuple[str, str]] = []
+    first = PersistentIncidentTracker(record, lambda incident, evidence: published.append((incident, evidence)))
+    for _ in range(3):
+        assert first.record_failure("backup", "sha256:evidence") in {None, "incident:backup"}
+
+    restarted = PersistentIncidentTracker(record, lambda incident, evidence: published.append((incident, evidence)))
+    assert restarted.record_failure("backup", "sha256:evidence") == "incident:backup"
+    assert published == [("incident:backup", "sha256:evidence")]

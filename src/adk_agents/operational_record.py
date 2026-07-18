@@ -33,6 +33,10 @@ _MIGRATION_3_STATEMENTS = (
     "CREATE TABLE poll_checkpoint (project_id TEXT PRIMARY KEY, cursor TEXT, last_success_at TEXT, updated_at TEXT NOT NULL)",
 )
 _MIGRATION_3 = "\n".join(_MIGRATION_3_STATEMENTS)
+_MIGRATION_4_STATEMENTS = (
+    "CREATE TABLE operational_incident (operation TEXT PRIMARY KEY, incident_ref TEXT NOT NULL, consecutive_failures INTEGER NOT NULL, opened_at TEXT NOT NULL, healthy_since TEXT, closed_at TEXT, evidence_ref TEXT NOT NULL)",
+)
+_MIGRATION_4 = "\n".join(_MIGRATION_4_STATEMENTS)
 
 
 class OperationalRecord:
@@ -46,7 +50,7 @@ class OperationalRecord:
         with self.connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migration (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)")
-            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3)):
+            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4)):
                 checksum = hashlib.sha256(migration.encode()).hexdigest()
                 existing = connection.execute("SELECT checksum FROM schema_migration WHERE version = ?", (version,)).fetchone()
                 if existing is not None and existing[0] != checksum:
@@ -89,7 +93,7 @@ class OperationalRecord:
         foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         triggers = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
-        required_tables = {"schema_migration", "artifact_manifest", "evidence_ledger", "cleanup_run", "model_assessment", "model_selection", "dispatch", "invocation_trace", "poll_checkpoint"}
+        required_tables = {"schema_migration", "artifact_manifest", "evidence_ledger", "cleanup_run", "model_assessment", "model_selection", "dispatch", "invocation_trace", "poll_checkpoint", "operational_incident"}
         required_triggers = {"evidence_ledger_append_only", "evidence_ledger_no_delete"}
         if integrity != "ok" or foreign_keys or not required_tables <= tables or not required_triggers <= triggers:
             raise RecordIntegrityError("SQLite integrity safeguards failed")

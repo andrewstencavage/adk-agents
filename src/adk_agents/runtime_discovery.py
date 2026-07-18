@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from .routing import ModelRef
 
@@ -23,7 +24,8 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         if self.runtime_id not in {"ollama", "lm_studio"}:
             raise ValueError("only configured Ollama and LM Studio runtimes are supported")
-        if not self.base_url.startswith(("http://127.0.0.1", "http://localhost")):
+        endpoint = urlsplit(self.base_url)
+        if endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "localhost", "::1"} or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
             raise ValueError("runtime endpoint must be a configured loopback endpoint")
 
 

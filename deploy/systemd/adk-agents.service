@@ -1,5 +1,7 @@
 [Unit]
 Description=ADK agents local service
+StartLimitIntervalSec=600
+StartLimitBurst=3
 After=network-online.target
 Wants=network-online.target
 
@@ -11,8 +13,6 @@ WorkingDirectory=/var/lib/adk-agents
 ExecStart=/var/lib/adk-agents/venv/bin/python -m adk_agents.service
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=600
-StartLimitBurst=3
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes

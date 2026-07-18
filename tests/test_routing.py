@@ -59,6 +59,12 @@ def test_discovery_uses_only_configured_loopback_inventory_endpoints():
     assert not any("load" in url or "pull" in url for _, url in transport.calls)
 
 
+@pytest.mark.parametrize("url", ["http://127.0.0.1.evil", "http://127.0.0.1@evil.example", "http://localhost.evil", "https://example.com"])
+def test_runtime_configuration_rejects_loopback_lookalikes(url):
+    with pytest.raises(ValueError, match="loopback"):
+        RuntimeConfig("ollama", url, "0.1")
+
+
 def test_router_blocks_when_no_current_passing_exact_assessment(tmp_path):
     record = OperationalRecord(tmp_path / "record.sqlite3")
     record.startup()
