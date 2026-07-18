@@ -45,12 +45,14 @@ def test_review_requires_read_only_checkout_and_only_creates_pr_after_acceptance
     service = ReviewService(lambda body: created.append(body) or "pr-7")
 
     rejected = service.review(read_only=False, findings=[])
-    accepted = service.review(read_only=True, findings=[], story_ref="#16", branch="agent/16-safe", commits=("abc",), checks=("pytest",))
+    accepted = service.review(read_only=True, findings=[], story_ref="#16", branch="agent/16-safe", commits=("abc",), checks=("pytest",), implementation_summary="safe change")
 
     assert rejected.blocked
     assert accepted.pr_ref == "pr-7"
     assert created[0]["base"] == "main"
     assert created[0]["approval"] is False
+    assert created[0]["summary"] == "safe change"
+    assert created[0]["revision_count"] == 0
 
 
 def test_review_blocks_after_two_corrections_and_reports_actionable_findings():

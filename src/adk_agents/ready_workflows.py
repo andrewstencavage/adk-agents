@@ -98,7 +98,7 @@ class ReviewService:
             except TransientCheckFailure:
                 return ReviewOutcome(blocked=True)
 
-    def review(self, *, read_only: bool, findings: list[ReviewFinding], story_ref: str = "", branch: str = "", commits: tuple[str, ...] = (), checks: tuple[str, ...] = ()) -> ReviewOutcome:
+    def review(self, *, read_only: bool, findings: list[ReviewFinding], story_ref: str = "", branch: str = "", commits: tuple[str, ...] = (), checks: tuple[str, ...] = (), implementation_summary: str = "") -> ReviewOutcome:
         if not read_only:
             return ReviewOutcome(blocked=True)
         if findings:
@@ -106,9 +106,9 @@ class ReviewService:
                 return ReviewOutcome(blocked=True)
             self._corrections += 1
             return ReviewOutcome(needs_revision=True)
-        if not story_ref or not branch or not commits or not checks:
+        if not story_ref or not branch or not commits or not checks or not implementation_summary:
             return ReviewOutcome(blocked=True)
-        return ReviewOutcome(pr_ref=self._create_pr({"story": story_ref, "head": branch, "base": "main", "commits": commits, "checks": checks, "review_gate": "v1", "approval": False, "merge": False, "deploy": False}))
+        return ReviewOutcome(pr_ref=self._create_pr({"story": story_ref, "head": branch, "base": "main", "commits": commits, "checks": checks, "summary": implementation_summary, "review_gate": "v1", "revision_count": self._corrections, "approval": False, "merge": False, "deploy": False}))
 
 
 @dataclass(frozen=True)
