@@ -122,23 +122,26 @@ start_lm_studio() {
 }
 
 assert_loopback_listener() {
-  local port="$1" report
-  if command -v lsof >/dev/null 2>&1; then
-    report="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-  elif command -v ss >/dev/null 2>&1; then
-    report="$(ss -ltn "sport = :$port" 2>/dev/null || true)"
+  local port="$1" listeners listener
+  if command -v ss >/dev/null 2>&1; then
+    listeners="$(ss -H -ltn "sport = :$port" 2>/dev/null | awk '{print $4}')"
+  elif command -v lsof >/dev/null 2>&1; then
+    listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n//p')"
   else
     note "WARNING: cannot inspect the listener for port $port (no lsof or ss)."
     return
   fi
-  [[ -n "$report" ]] || fail "No listening process found for port $port after its health check."
-  if grep -Eq '(^|[[:space:]])(\*|0\.0\.0\.0|\[::\]|:::)' <<<"$report"; then
-    fail "Port $port is publicly bound. Stop that runtime and re-run; this bootstrap requires loopback-only listeners."
-  fi
+  [[ -n "$listeners" ]] || fail "No listening process found for port $port after its health check."
+  while IFS= read -r listener; do
+    case "$listener" in
+      127.0.0.1:*|'[::1]:'*|::1:*) ;;
+      *) fail "Port $port is publicly bound. Stop that runtime and re-run; this bootstrap requires loopback-only listeners." ;;
+    esac
+  done <<<"$listeners"
 }
 
 capture_inventory() {
-  OLLAMA_URL="$OLLAMA_URL" LM_STUDIO_URL="$LM_STUDIO_URL" LM_STUDIO_API_TOKEN="${LM_STUDIO_API_TOKEN:-}" OUTPUT_FILE="$OUTPUT_FILE" python3 - <<'PY'
+  env OLLAMA_URL="$OLLAMA_URL" LM_STUDIO_URL="$LM_STUDIO_URL" LM_STUDIO_API_TOKEN="${LM_STUDIO_API_TOKEN:-}" OUTPUT_FILE="$OUTPUT_FILE" python3 - <<'PY'
 import hashlib
 import json
 import os
