@@ -117,8 +117,8 @@ The local, configurable scheduler that discovers eligible approved work from Git
 _Avoid_: inbound webhook, manual-only trigger
 
 **GitHub credential**:
-A fine-grained personal access token restricted to the target repository and the minimum permissions needed for the first release's GitHub operations.
-_Avoid_: broad classic token, shared credential
+A fine-grained personal access token restricted to the target repository and the minimum permissions needed for the first release's GitHub operations. A user-owned GitHub Project V2 is the narrow platform exception: GitHub does not support fine-grained tokens for that API surface, so its Project-only GraphQL operations use a separate classic token limited to the `project` scope. Issue access remains a separate repository-scoped fine-grained token.
+_Avoid_: broad classic token, shared credential, using the Project token for repository Issue operations
 
 **Change-publication credential**:
 A host-held, repository-scoped fine-grained credential with Contents write and Pull requests write that pushes a commit-authority-created story branch and lets Review create a normal PR. It is never exposed to Coding and cannot approve, merge, or alter protected-branch rules.
