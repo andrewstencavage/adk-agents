@@ -1,7 +1,7 @@
 import pytest
 
-from adk_agents.github_project_reader import GitHubProjectFieldWriter, GitHubProjectReader
-from adk_agents.task_board import BoardConfig
+from adk_agents.github_project_reader import GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway
+from adk_agents.task_board import BoardComment, BoardConfig, ProjectStory
 
 
 class FakeGraphQL:
@@ -42,3 +42,39 @@ def test_project_field_writer_allows_only_dispatch_and_safe_agent_statuses():
     assert graphql.calls[1][1]["value"] == {"singleSelectOptionId": "progress"}
     with pytest.raises(PermissionError):
         writer.set_status("item", "ready")
+
+
+def test_concrete_gateway_composes_pinned_project_and_issue_operations():
+    story = ProjectStory("project", "owner", "repo", "item", "issue", 15, True, frozenset({"adk:story"}), "ready", "now", "now", "Research")
+
+    class Reader:
+        def get_story(self, item):
+            assert item == "item"
+            return story
+        def issue_number(self, issue):
+            assert issue == "issue"
+            return 15
+
+    class Writer:
+        def __init__(self): self.calls = []
+        def set_dispatch_id(self, item, dispatch): self.calls.append((item, dispatch))
+        def set_status(self, item, status): self.calls.append((item, status))
+
+    class Comments:
+        def list(self, number):
+            assert number == 15
+            return [BoardComment("1", "existing")]
+        def add(self, number, body):
+            assert number == 15
+            assert body == "claim"
+            return "2"
+
+    writer = Writer()
+    gateway = GitHubTaskBoardGateway(Reader(), writer, Comments())
+
+    assert gateway.get_story("item") == story
+    assert gateway.list_comments("issue") == [BoardComment("1", "existing")]
+    assert gateway.add_comment("issue", "claim") == "2"
+    gateway.set_dispatch_id("item", "dispatch")
+    gateway.set_status("item", "progress")
+    assert writer.calls == [("item", "dispatch"), ("item", "progress")]
