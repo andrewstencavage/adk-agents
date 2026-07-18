@@ -3,6 +3,7 @@ from adk_agents.service import build_task_for
 from adk_agents.service import build_polling_service
 from datetime import datetime, timedelta, timezone
 import json
+import adk_agents.service as service_module
 
 
 def test_mock_manager_has_only_the_static_specialist_registry(tmp_path):
@@ -36,3 +37,18 @@ def test_composed_service_reads_ready_stories_then_claims_before_admission(tmp_p
 
     assert service.tick() == 1
     assert events[0][:2] == ("dispatch-1", "completed")
+
+
+def test_mock_polling_loop_never_supplies_a_candidate(monkeypatch):
+    observed = {}
+
+    class Poller:
+        def __init__(self, _board, _manager, _workflow, candidates, _task_for):
+            observed["candidates"] = list(candidates())
+        def run_forever(self, *, interval_seconds):
+            observed["interval"] = interval_seconds
+
+    monkeypatch.setattr(service_module, "PollingService", Poller)
+    service_module.run_mock_polling_loop()
+
+    assert observed == {"candidates": [], "interval": 60}

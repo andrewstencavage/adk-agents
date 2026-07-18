@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .config import ServiceConfig
@@ -29,11 +30,22 @@ def build_polling_service(board, manager, workflow, project_reader, issue_body_r
     )
 
 
+def run_mock_polling_loop() -> None:
+    """Keep the supervised service alive without touching GitHub or any model."""
+    class Noop:
+        def __getattr__(self, _name):
+            raise AssertionError("a mock polling tick must not reach an external boundary")
+
+    PollingService(Noop(), Noop(), Noop(), lambda: (), lambda *_: {}).run_forever(interval_seconds=60)
+
+
 def main() -> None:
-    """Run startup safety checks; a host scheduler owns the polling loop."""
+    """Run startup checks and, only when explicit, a safe no-op supervised poller."""
     config = ServiceConfig.from_environment()
     config.backup_dir.mkdir(parents=True, exist_ok=True)
     OperationalRecord(config.data_dir / "record.sqlite3").startup()
+    if os.environ.get("ADK_AGENTS_SERVICE_MODE") == "mock":
+        run_mock_polling_loop()
 
 
 if __name__ == "__main__":
