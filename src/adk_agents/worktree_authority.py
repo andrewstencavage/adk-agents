@@ -17,3 +17,9 @@ class WorktreeAuthority:
         path = self._root / f"{issue_number}-{slug}"
         self._run_host_git(("git", "worktree", "add", "-b", branch, str(path), "main"))
         return path
+
+    def remove(self, path: str | Path) -> None:
+        candidate = Path(path).resolve()
+        if candidate.parent != self._root.resolve() or not candidate.name.split("-", 1)[0].isdigit():
+            raise ValueError("only a managed story worktree may be removed")
+        self._run_host_git(("git", "worktree", "remove", "--force", str(candidate)))
