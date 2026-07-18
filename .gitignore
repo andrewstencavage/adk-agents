@@ -1,0 +1,3 @@
+# Generated only on the target host. These records describe that host's
+# installed local-model runtimes and must not be committed.
+var/
