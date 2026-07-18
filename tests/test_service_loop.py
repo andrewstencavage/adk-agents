@@ -69,6 +69,18 @@ def test_no_eligible_model_blocks_the_claimed_story_after_recording_the_handoff(
     assert board.blocked == [("ready-story", "dispatch-0001", "No eligible assessed model.")]
 
 
+def test_dispatch_failure_after_claim_becomes_a_visible_blocked_recovery():
+    class FailingManager:
+        def admit(self, _task):
+            raise OSError("local runtime unavailable")
+
+    board, workflow = Board(), Workflow()
+    service = PollingService(board, FailingManager(), workflow, lambda: ["ready-story"], lambda _candidate, dispatch: {"dispatch_id": dispatch, "story_ref": "#19"})
+
+    assert service.tick() == 0
+    assert board.blocked == [("ready-story", "dispatch-0001", "Dispatch failed: OSError")]
+
+
 def test_polling_service_runs_serial_ticks_until_the_host_stops_it():
     board, workflow = Board(), Workflow()
     service = PollingService(board, Manager(), workflow, lambda: ["ready-story"], lambda _candidate, dispatch: {"dispatch_id": dispatch, "story_ref": "#19"})

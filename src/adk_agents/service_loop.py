@@ -43,13 +43,16 @@ class PollingService:
             if claim is None:
                 continue
             dispatch_id = getattr(claim, "dispatch_id")
-            task = self._task_for(candidate, dispatch_id)
-            self._workflow.dispatch(dispatch_id, task["story_ref"], task)
-            result = self._manager.admit(task)
-            self._workflow.handoff(dispatch_id, result.status.value, result.model_dump(mode="json"))
-            if result.status.value == "blocked":
-                self._board.block_claimed_story(candidate, claim, result.summary)
-            dispatched += 1
+            try:
+                task = self._task_for(candidate, dispatch_id)
+                self._workflow.dispatch(dispatch_id, task["story_ref"], task)
+                result = self._manager.admit(task)
+                self._workflow.handoff(dispatch_id, result.status.value, result.model_dump(mode="json"))
+                if result.status.value == "blocked":
+                    self._board.block_claimed_story(candidate, claim, result.summary)
+                dispatched += 1
+            except Exception as error:
+                self._board.block_claimed_story(candidate, claim, f"Dispatch failed: {type(error).__name__}")
         return dispatched
 
     def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:
