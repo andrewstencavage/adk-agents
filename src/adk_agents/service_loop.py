@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from time import sleep
 from typing import Any, Protocol
 
 
@@ -35,3 +36,12 @@ class PollingService:
             self._workflow.handoff(dispatch_id, result.status.value, result.model_dump(mode="json"))
             dispatched += 1
         return dispatched
+
+    def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:
+        """Run serial polling ticks until the host's shutdown signal is observed."""
+        if interval_seconds <= 0:
+            raise ValueError("poll interval must be positive")
+        while not should_stop():
+            self.tick()
+            if not should_stop():
+                wait(interval_seconds)
