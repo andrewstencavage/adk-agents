@@ -155,13 +155,8 @@ def test_restart_confirms_a_persisted_in_progress_claim_intent(tmp_path):
     gateway = FakeBoardGateway(ready_story())
     database = tmp_path / "record.sqlite3"
     first = TaskBoardAdapter(CONFIG, gateway, DispatchStore(database))
-    dispatch = first._store.prepare(gateway.story, CONFIG.ready_option_id)
+    dispatch = first.claim_ready_story(gateway.story)
     assert dispatch is not None
-    comment = first._store.claim_event(dispatch.dispatch_id, gateway.story)
-    comment_id = gateway.add_comment(gateway.story.issue_node_id, comment)
-    first._store.record_comment(dispatch.dispatch_id, comment_id, comment)
-    gateway.set_dispatch_id(gateway.story.project_item_id, dispatch.dispatch_id)
-    gateway.set_status(gateway.story.project_item_id, CONFIG.in_progress_option_id)
 
     recovered = TaskBoardAdapter(CONFIG, gateway, DispatchStore(database)).claim_ready_story(gateway.story)
 

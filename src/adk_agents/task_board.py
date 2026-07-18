@@ -1,11 +1,10 @@
-"""Restart-safe, least-privilege GitHub Project claim protocol."""
+"""Small, single-process GitHub Project claim adapter for the local app."""
 
 from __future__ import annotations
 
 import json
-import hashlib
-import secrets
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,12 +13,10 @@ from typing import Protocol
 from uuid import UUID
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _uuid7() -> str:
-    """Generate a time-ordered UUIDv7 on Python versions before uuid.uuid7."""
+    """Return a time-ordered UUID without requiring a newer Python runtime."""
+    import secrets
+
     milliseconds = int(time.time() * 1_000)
     value = (milliseconds << 80) | (0x7 << 76) | (secrets.randbits(12) << 64)
     value |= (0b10 << 62) | secrets.randbits(62)
@@ -67,398 +64,148 @@ class BoardComment:
 
 
 class BoardGateway(Protocol):
-    """The only GitHub operations granted to the Scrum Master adapter."""
-
     def get_story(self, project_item_id: str) -> ProjectStory: ...
-
     def list_comments(self, issue_node_id: str) -> list[BoardComment]: ...
-
     def add_comment(self, issue_node_id: str, body: str) -> str: ...
-
     def set_dispatch_id(self, project_item_id: str, dispatch_id: str) -> None: ...
-
     def set_status(self, project_item_id: str, option_id: str) -> None: ...
 
 
 class DispatchStore:
-    """Local intent record used only to prevent duplicate external effects."""
+    """SQLite records enough intent to avoid duplicate claims after a restart."""
 
     def __init__(self, database_path: str | Path) -> None:
         self._path = Path(database_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
+        with self._connect() as db:
+            db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS board_observation (
-                    project_id TEXT NOT NULL,
-                    project_item_id TEXT NOT NULL,
-                    last_status_option_id TEXT NOT NULL,
-                    ready_generation INTEGER NOT NULL,
-                    PRIMARY KEY(project_id, project_item_id)
+                    project_item_id TEXT PRIMARY KEY,
+                    last_status TEXT NOT NULL,
+                    ready_generation INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS board_dispatch (
                     dispatch_id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL,
                     project_item_id TEXT NOT NULL,
-                    issue_node_id TEXT NOT NULL,
                     ready_generation INTEGER NOT NULL,
-                    source_updated_at TEXT NOT NULL,
-                    source_status_version TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK(state IN ('intent', 'confirmed', 'superseded')),
-                    event_id TEXT NOT NULL,
                     comment_id TEXT,
-                    comment_digest TEXT,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(project_id, project_item_id, ready_generation)
+                    confirmed INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(project_item_id, ready_generation)
                 );
-                CREATE TABLE IF NOT EXISTS board_lease (
-                    lease_name TEXT PRIMARY KEY,
-                    owner_id TEXT NOT NULL,
-                    expires_at REAL NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS schema_migration (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-                INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (1, CURRENT_TIMESTAMP);
                 """
             )
-            columns = {row["name"] for row in connection.execute("PRAGMA table_info(board_dispatch)")}
-            if "source_status_version" not in columns:
-                connection.execute(
-                    "ALTER TABLE board_dispatch ADD COLUMN source_status_version TEXT NOT NULL DEFAULT ''"
-                )
-            connection.execute(
-                "INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (2, CURRENT_TIMESTAMP)"
-            )
 
-    def prepare(self, story: ProjectStory, ready_option_id: str) -> Dispatch | None:
-        """Persist/reuse intent, incrementing generation only on a Ready edge."""
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            observed = connection.execute(
-                "SELECT last_status_option_id, ready_generation FROM board_observation "
-                "WHERE project_id = ? AND project_item_id = ?",
-                (story.project_id, story.project_item_id),
+    def prepare(self, story: ProjectStory, ready_status: str) -> Dispatch | None:
+        with self._connect() as db:
+            previous = db.execute(
+                "SELECT last_status, ready_generation FROM board_observation WHERE project_item_id = ?",
+                (story.project_item_id,),
             ).fetchone()
-            generation = 1
-            if observed is not None:
-                generation = observed["ready_generation"]
-                if (
-                    observed["last_status_option_id"] != ready_option_id
-                    and story.status_option_id == ready_option_id
-                ):
-                    generation += 1
-            connection.execute(
-                """INSERT INTO board_observation(project_id, project_item_id, last_status_option_id, ready_generation)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(project_id, project_item_id) DO UPDATE SET
-                     last_status_option_id = excluded.last_status_option_id,
-                     ready_generation = excluded.ready_generation""",
-                (story.project_id, story.project_item_id, story.status_option_id, generation),
+            generation = 1 if previous is None else previous["ready_generation"]
+            if previous is not None and previous["last_status"] != ready_status and story.status_option_id == ready_status:
+                generation += 1
+            db.execute(
+                """INSERT INTO board_observation(project_item_id, last_status, ready_generation) VALUES (?, ?, ?)
+                   ON CONFLICT(project_item_id) DO UPDATE SET last_status=excluded.last_status, ready_generation=excluded.ready_generation""",
+                (story.project_item_id, story.status_option_id, generation),
             )
-            if story.status_option_id != ready_option_id:
+            if story.status_option_id != ready_status:
                 return None
-            existing = connection.execute(
-                "SELECT dispatch_id, project_item_id, ready_generation FROM board_dispatch "
-                "WHERE project_id = ? AND project_item_id = ? AND ready_generation = ?",
-                (story.project_id, story.project_item_id, generation),
+            row = db.execute(
+                "SELECT dispatch_id, ready_generation FROM board_dispatch WHERE project_item_id = ? AND ready_generation = ?",
+                (story.project_item_id, generation),
             ).fetchone()
-            if existing is None:
+            if row is None:
                 dispatch_id = _uuid7()
-                connection.execute(
-                    """INSERT INTO board_dispatch
-                       (dispatch_id, project_id, project_item_id, issue_node_id, ready_generation, source_updated_at, source_status_version, state, event_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)""",
-                    (
-                        dispatch_id,
-                        story.project_id,
-                        story.project_item_id,
-                        story.issue_node_id,
-                        generation,
-                        story.updated_at,
-                        story.status_version,
-                        _uuid7(),
-                        _utc_now(),
-                    ),
+                db.execute(
+                    "INSERT INTO board_dispatch(dispatch_id, project_item_id, ready_generation) VALUES (?, ?, ?)",
+                    (dispatch_id, story.project_item_id, generation),
                 )
                 return Dispatch(dispatch_id, story.project_item_id, generation)
-            return Dispatch(existing["dispatch_id"], existing["project_item_id"], existing["ready_generation"])
+            return Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"])
 
-    def observe(self, story: ProjectStory, ready_option_id: str) -> None:
-        """Record a non-dispatchable status so a later Ready edge gets a new generation."""
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            observed = connection.execute(
-                "SELECT last_status_option_id, ready_generation FROM board_observation "
-                "WHERE project_id = ? AND project_item_id = ?",
-                (story.project_id, story.project_item_id),
-            ).fetchone()
-            generation = 1 if observed is None else observed["ready_generation"]
-            if observed is not None and observed["last_status_option_id"] != ready_option_id and story.status_option_id == ready_option_id:
-                generation += 1
-            connection.execute(
-                """INSERT INTO board_observation(project_id, project_item_id, last_status_option_id, ready_generation)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(project_id, project_item_id) DO UPDATE SET
-                     last_status_option_id = excluded.last_status_option_id,
-                     ready_generation = excluded.ready_generation""",
-                (story.project_id, story.project_item_id, story.status_option_id, generation),
-            )
+    def record_comment(self, dispatch_id: str, comment_id: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE board_dispatch SET comment_id = ? WHERE dispatch_id = ?", (comment_id, dispatch_id))
 
-    def claim_event(self, dispatch_id: str, story: ProjectStory) -> str:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT event_id FROM board_dispatch WHERE dispatch_id = ?", (dispatch_id,)
-            ).fetchone()
-        if row is None:
-            raise ValueError("unknown dispatch")
-        envelope = {
-            "event_id": row["event_id"],
-            "dispatch_id": dispatch_id,
-            "kind": "dispatch.claimed",
-            "occurred_at": _utc_now(),
-            "schema_version": 1,
-            "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
-        }
-        return "<!-- adk-event:v1\n" + json.dumps(envelope, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
-
-    def event_id(self, dispatch_id: str) -> str:
-        with self._connect() as connection:
-            row = connection.execute("SELECT event_id FROM board_dispatch WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
-        if row is None:
-            raise ValueError("unknown dispatch")
-        return row["event_id"]
-
-    def comment_id(self, dispatch_id: str) -> str | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT comment_id FROM board_dispatch WHERE dispatch_id = ?", (dispatch_id,)
-            ).fetchone()
-        return None if row is None else row["comment_id"]
-
-    def record_comment(self, dispatch_id: str, comment_id: str, body: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE board_dispatch SET comment_id = ?, comment_digest = ? WHERE dispatch_id = ?",
-                (comment_id, _body_digest(body), dispatch_id),
-            )
+    def has_comment(self, dispatch_id: str) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT comment_id FROM board_dispatch WHERE dispatch_id = ?", (dispatch_id,)).fetchone()["comment_id"] is not None
 
     def confirm(self, dispatch_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE board_dispatch SET state = 'confirmed' WHERE dispatch_id = ?", (dispatch_id,)
-            )
+        with self._connect() as db:
+            db.execute("UPDATE board_dispatch SET confirmed = 1 WHERE dispatch_id = ?", (dispatch_id,))
 
-    def confirmed_dispatch(self, story: ProjectStory) -> Dispatch | None:
+    def existing(self, story: ProjectStory) -> Dispatch | None:
         if story.dispatch_id is None:
             return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """SELECT dispatch_id, project_item_id, ready_generation FROM board_dispatch
-                   WHERE dispatch_id = ? AND project_id = ? AND project_item_id = ? AND state = 'confirmed'""",
-                (story.dispatch_id, story.project_id, story.project_item_id),
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT dispatch_id, ready_generation FROM board_dispatch WHERE dispatch_id = ? AND project_item_id = ?",
+                (story.dispatch_id, story.project_item_id),
             ).fetchone()
-        return None if row is None else Dispatch(row["dispatch_id"], row["project_item_id"], row["ready_generation"])
-
-    def pending_dispatch(self, story: ProjectStory) -> Dispatch | None:
-        if story.dispatch_id is None:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """SELECT dispatch_id, project_item_id, ready_generation FROM board_dispatch
-                   WHERE dispatch_id = ? AND project_id = ? AND project_item_id = ? AND state = 'intent'""",
-                (story.dispatch_id, story.project_id, story.project_item_id),
-            ).fetchone()
-        return None if row is None else Dispatch(row["dispatch_id"], row["project_item_id"], row["ready_generation"])
-
-    def supersede(self, dispatch_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE board_dispatch SET state = 'superseded' WHERE dispatch_id = ?", (dispatch_id,)
-            )
-
-    def acquire_lease(self, owner_id: str, ttl_seconds: int = 60) -> bool:
-        now = time.time()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT owner_id, expires_at FROM board_lease WHERE lease_name = 'claim'").fetchone()
-            if row is not None and row["owner_id"] != owner_id and row["expires_at"] > now:
-                return False
-            connection.execute(
-                """INSERT INTO board_lease(lease_name, owner_id, expires_at) VALUES ('claim', ?, ?)
-                   ON CONFLICT(lease_name) DO UPDATE SET owner_id = excluded.owner_id, expires_at = excluded.expires_at""",
-                (owner_id, now + ttl_seconds),
-            )
-            return True
-
-    def release_lease(self, owner_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute("DELETE FROM board_lease WHERE lease_name = 'claim' AND owner_id = ?", (owner_id,))
-
-    def renew_lease(self, owner_id: str, ttl_seconds: int = 60) -> None:
-        with self._connect() as connection:
-            updated = connection.execute(
-                "UPDATE board_lease SET expires_at = ? WHERE lease_name = 'claim' AND owner_id = ?",
-                (time.time() + ttl_seconds, owner_id),
-            ).rowcount
-        if updated != 1:
-            raise RuntimeError("claim lease was lost")
+        return None if row is None else Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"])
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        db = sqlite3.connect(self._path)
+        db.row_factory = sqlite3.Row
+        return db
 
 
 class TaskBoardAdapter:
-    """Claims Ready stories; this adapter has no operation for Ready or Done."""
+    """One-process claim flow. GitHub remains the visible lifecycle authority."""
+
+    _claim_lock = threading.Lock()
 
     def __init__(self, config: BoardConfig, gateway: BoardGateway, store: DispatchStore) -> None:
-        self._config = config
-        self._gateway = gateway
-        self._store = store
-        self._lease_owner = _uuid7()
+        self._config, self._gateway, self._store = config, gateway, store
 
     def claim_ready_story(self, candidate: ProjectStory) -> Dispatch | None:
-        """Converge an eligible Ready story to one confirmed dispatch or no-op."""
-        if not self._store.acquire_lease(self._lease_owner):
-            return None
-        try:
-            return self._claim_ready_story(candidate)
-        finally:
-            self._store.release_lease(self._lease_owner)
-
-    def _claim_ready_story(self, candidate: ProjectStory) -> Dispatch | None:
-        recovered = self._store.confirmed_dispatch(candidate)
-        if (
-            recovered is not None
-            and candidate.status_option_id == self._config.in_progress_option_id
-        ):
-            return recovered
-        pending = self._store.pending_dispatch(candidate)
-        if (
-            pending is not None
-            and candidate.status_option_id == self._config.in_progress_option_id
-            and self._find_claim_comment(candidate.issue_node_id, pending.dispatch_id, candidate.project_item_id) is not None
-        ):
-            self._store.confirm(pending.dispatch_id)
-            return pending
-        if not self._belongs_to_configured_board(candidate):
-            return None
-        if not self._is_ready_story(candidate):
-            self._store.observe(candidate, self._config.ready_option_id)
-            return None
-        dispatch = self._store.prepare(candidate, self._config.ready_option_id)
-        if dispatch is None:
-            return None
-        self._store.renew_lease(self._lease_owner)
-        current = self._gateway.get_story(candidate.project_item_id)
-        if not self._is_ready_story(current):
-            self._store.supersede(dispatch.dispatch_id)
+        with self._claim_lock:
+            existing = self._store.existing(candidate)
+            if existing is not None and candidate.status_option_id == self._config.in_progress_option_id:
+                self._store.confirm(existing.dispatch_id)
+                return existing
+            if not self._is_managed(candidate):
+                return None
+            dispatch = self._store.prepare(candidate, self._config.ready_option_id)
+            if dispatch is None or not self._is_ready(candidate):
+                return None
+            current = self._gateway.get_story(candidate.project_item_id)
+            if not self._is_ready(current):
+                return None
+            if not self._store.has_comment(dispatch.dispatch_id):
+                comment_id = self._gateway.add_comment(current.issue_node_id, _claim_comment(dispatch, current))
+                self._store.record_comment(dispatch.dispatch_id, comment_id)
+            current = self._gateway.get_story(candidate.project_item_id)
+            if not self._is_ready(current):
+                return None
+            if current.dispatch_id != dispatch.dispatch_id:
+                self._gateway.set_dispatch_id(current.project_item_id, dispatch.dispatch_id)
+            current = self._gateway.get_story(candidate.project_item_id)
+            if self._is_ready(current):
+                self._gateway.set_status(current.project_item_id, self._config.in_progress_option_id)
+            final = self._gateway.get_story(candidate.project_item_id)
+            if final.status_option_id == self._config.in_progress_option_id and final.dispatch_id == dispatch.dispatch_id:
+                self._store.confirm(dispatch.dispatch_id)
+                return dispatch
             return None
 
-        if self._store.comment_id(dispatch.dispatch_id) is None:
-            comment = self._store.claim_event(dispatch.dispatch_id, current)
-            existing = self._find_claim_comment(current.issue_node_id, dispatch.dispatch_id, current.project_item_id)
-            if existing is None:
-                self._store.renew_lease(self._lease_owner)
-                comment_id = self._gateway.add_comment(current.issue_node_id, comment)
-                comment_body = comment
-            else:
-                comment_id = existing.comment_id
-                comment_body = existing.body
-            self._store.record_comment(
-                dispatch.dispatch_id,
-                comment_id,
-                comment_body,
-            )
-
-        current = self._gateway.get_story(candidate.project_item_id)
-        if not self._is_ready_story(current):
-            self._store.supersede(dispatch.dispatch_id)
-            return None
-        if current.dispatch_id != dispatch.dispatch_id:
-            self._store.renew_lease(self._lease_owner)
-            self._gateway.set_dispatch_id(candidate.project_item_id, dispatch.dispatch_id)
-        current = self._gateway.get_story(candidate.project_item_id)
-        if self._is_ready_story(current):
-            self._store.renew_lease(self._lease_owner)
-            self._gateway.set_status(candidate.project_item_id, self._config.in_progress_option_id)
-        final = self._gateway.get_story(candidate.project_item_id)
-        if (
-            final.status_option_id == self._config.in_progress_option_id
-            and final.dispatch_id == dispatch.dispatch_id
-        ):
-            self._store.confirm(dispatch.dispatch_id)
-            return dispatch
-        if self._belongs_to_configured_board(final) and final.status_option_id in {
-            self._config.ready_option_id,
-            self._config.in_progress_option_id,
-        }:
-            self._store.renew_lease(self._lease_owner)
-            self._gateway.add_comment(
-                final.issue_node_id,
-                "## Agent update · Blocked\n\nClaim reconciliation failed; human review is required.",
-            )
-            self._gateway.set_status(final.project_item_id, self._config.blocked_option_id)
-        return None
-
-    def _is_ready_story(self, story: ProjectStory) -> bool:
+    def _is_managed(self, story: ProjectStory) -> bool:
         return (
-            self._belongs_to_configured_board(story)
-            and story.is_open
-            and "adk:story" in story.labels
-            and story.status_option_id == self._config.ready_option_id
-            and story.primary_specialist in {"Scrum Master", "Research", "Coding", "Review"}
+            story.project_id == self._config.project_id and story.owner == self._config.owner
+            and story.repository == self._config.repository and story.is_open and "adk:story" in story.labels
         )
 
-    def _belongs_to_configured_board(self, story: ProjectStory) -> bool:
-        return (
-            story.project_id == self._config.project_id
-            and story.owner == self._config.owner
-            and story.repository == self._config.repository
-        )
-
-    def _find_claim_comment(self, issue_node_id: str, dispatch_id: str, project_item_id: str) -> BoardComment | None:
-        expected_event_id = self._store.event_id(dispatch_id)
-        for comment in self._gateway.list_comments(issue_node_id):
-            event = _parse_event(comment.body)
-            if event is None or event.get("dispatch_id") != dispatch_id:
-                continue
-            if event.get("event_id") != expected_event_id or event.get("payload") != {"project_item_id": project_item_id, "status": "In Progress"}:
-                raise EventIntegrityError("conflicting claim event for dispatch")
-            if event.get("kind") == "dispatch.claimed":
-                return comment
-        return None
+    def _is_ready(self, story: ProjectStory) -> bool:
+        return self._is_managed(story) and story.status_option_id == self._config.ready_option_id and story.primary_specialist is not None
 
 
-def _body_digest(body: str) -> str:
-    return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
-
-
-class EventIntegrityError(ValueError):
-    """A matching dispatch ID with a different durable event is unsafe to retry."""
-
-
-def _parse_event(body: str) -> dict[str, object] | None:
-    prefix = "<!-- adk-event:v1\n"
-    if not body.startswith(prefix):
-        return False
-    try:
-        encoded = body[len(prefix) :].split("\n-->", maxsplit=1)[0]
-        event: dict[str, object] = json.loads(encoded)
-        UUID(event["event_id"])
-        UUID(event["dispatch_id"])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if event.get("schema_version") != 1 or not isinstance(event.get("payload"), dict):
-        return None
-    return event
-
-
-def _is_matching_claim_event(body: str, dispatch_id: str) -> bool:
-    event = _parse_event(body)
-    return event is not None and event.get("kind") == "dispatch.claimed" and event["dispatch_id"] == dispatch_id
+def _claim_comment(dispatch: Dispatch, story: ProjectStory) -> str:
+    event = {
+        "event_id": _uuid7(), "dispatch_id": dispatch.dispatch_id, "kind": "dispatch.claimed",
+        "occurred_at": datetime.now(timezone.utc).isoformat(), "schema_version": 1,
+        "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
+    }
+    return "<!-- adk-event:v1\n" + json.dumps(event, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
