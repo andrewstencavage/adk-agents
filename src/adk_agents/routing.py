@@ -93,7 +93,7 @@ class ModelRouter:
 
     def _passes_current_suite(self, model: ModelRef, role: SpecialistType) -> bool:
         row = self._latest_assessment(model, role)
-        return row is not None and row["status"] == AssessmentStatus.PASSED.value
+        return row is not None and row["status"] == AssessmentStatus.PASSED.value and float(row["score"]) >= _ROLE_THRESHOLDS[role]
 
     def _score(self, model: ModelRef, role: SpecialistType) -> float:
         row = self._latest_assessment(model, role)
@@ -117,3 +117,11 @@ def _digest(value: object) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_ROLE_THRESHOLDS = {
+    SpecialistType.SCRUM_MASTER: 95,
+    SpecialistType.RESEARCH: 85,
+    SpecialistType.CODING: 80,
+    SpecialistType.REVIEW: 85,
+}

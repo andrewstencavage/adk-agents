@@ -107,6 +107,16 @@ def test_changed_fingerprint_cannot_use_prior_assessment(tmp_path):
         router.select(RouteRequest(dispatch_id="dispatch-0001", role=SpecialistType.RESEARCH), [changed])
 
 
+def test_router_enforces_the_role_threshold_with_a_mocked_local_inventory(tmp_path):
+    record = OperationalRecord(tmp_path / "record.sqlite3")
+    record.startup()
+    router = ModelRouter(record, suite_version="2026.1")
+    router.record_assessment(assessment(SpecialistType.RESEARCH, score=84))
+
+    with pytest.raises(NoEligibleModel, match="eligible"):
+        router.select(RouteRequest(dispatch_id="dispatch-0001", role=SpecialistType.RESEARCH), [model()])
+
+
 def test_manager_returns_a_visible_blocked_story_when_nothing_is_eligible(tmp_path):
     record = OperationalRecord(tmp_path / "routing.sqlite3")
     record.startup()
