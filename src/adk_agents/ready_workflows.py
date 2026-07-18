@@ -111,3 +111,18 @@ class IncidentService:
         self._failures.pop(operation, None)
         self._record(StoryHandoff("incident.recovered", incident, "redacted"))
         return incident
+
+
+class BackupService:
+    """Host adapters own external-drive I/O and isolated SQLite restore validation."""
+
+    def __init__(self, copy_to_external: Callable[[str], None], verify_isolated_restore: Callable[[str], None]) -> None:
+        self._copy, self._verify = copy_to_external, verify_isolated_restore
+
+    def daily_backup(self, record_path: str) -> str:
+        self._copy(record_path)
+        return f"backup:{record_path}"
+
+    def monthly_restore_verify(self, backup_ref: str) -> bool:
+        self._verify(backup_ref)
+        return True

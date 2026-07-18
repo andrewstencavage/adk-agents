@@ -4,6 +4,7 @@ from datetime import datetime
 
 from adk_agents.ready_workflows import (
     CodingSession,
+    BackupService,
     CommitAuthority,
     IncidentService,
     ReviewFinding,
@@ -55,3 +56,14 @@ def test_incident_service_deduplicates_persistent_failures_and_closes_only_after
     assert len(events) == 1
     assert service.record_recovery("backup", healthy_hours=23) is None
     assert service.record_recovery("backup", healthy_hours=24) == "incident:backup"
+
+
+def test_backup_service_uses_external_snapshot_and_isolated_monthly_restore():
+    copied: list[str] = []
+    verified: list[str] = []
+    service = BackupService(copied.append, verified.append)
+
+    assert service.daily_backup("record.sqlite3") == "backup:record.sqlite3"
+    assert copied == ["record.sqlite3"]
+    assert service.monthly_restore_verify("backup:record.sqlite3") is True
+    assert verified == ["backup:record.sqlite3"]
