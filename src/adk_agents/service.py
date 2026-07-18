@@ -8,7 +8,7 @@ from .config import ServiceConfig
 from .operational_record import OperationalRecord
 from .manager import Manager, accepted_result
 from .trace import TraceStore
-from .service_loop import task_from_issue_body
+from .service_loop import PollingService, task_from_issue_body
 
 
 def build_mock_manager(data_dir: Path) -> Manager:
@@ -20,6 +20,13 @@ def build_mock_manager(data_dir: Path) -> Manager:
 def build_task_for(issue_body_reader):
     """Bind a read-only issue body reader to the poller's validated task seam."""
     return lambda story, dispatch_id: task_from_issue_body(issue_body_reader.body(story.issue_number), dispatch_id)
+
+
+def build_polling_service(board, manager, workflow, project_reader, issue_body_reader) -> PollingService:
+    """Compose the only dispatch path from Project Ready through durable handoff."""
+    return PollingService(
+        board, manager, workflow, project_reader.list_ready_stories, build_task_for(issue_body_reader)
+    )
 
 
 def main() -> None:
