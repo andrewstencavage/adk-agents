@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from uuid import UUID
 
 from adk_agents.task_board import (
     BoardConfig,
@@ -97,6 +98,16 @@ def test_restart_reuses_intent_and_does_not_duplicate_claim_comment(tmp_path):
     assert recovered.dispatch_id == claimed.dispatch_id
     assert len(gateway.comments) == 1
     assert gateway.status_writes == ["in-progress"]
+
+
+def test_prepared_dispatch_persists_a_uuid7_claim_event_across_restart(tmp_path):
+    database = tmp_path / "record.sqlite3"
+    first = DispatchStore(database).prepare(ready_story(), "ready")
+    second = DispatchStore(database).prepare(ready_story(), "ready")
+
+    assert first is not None and second is not None
+    assert first.event_id == second.event_id
+    assert UUID(first.event_id).version == 7
 
 
 def test_user_comment_with_only_a_dispatch_id_cannot_satisfy_claim_reconciliation(tmp_path):

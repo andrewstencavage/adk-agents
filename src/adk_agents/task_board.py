@@ -55,6 +55,8 @@ class Dispatch:
     dispatch_id: str
     project_item_id: str
     ready_generation: int
+    event_id: str
+    occurred_at: str
 
 
 @dataclass(frozen=True)
@@ -89,12 +91,19 @@ class DispatchStore:
                     dispatch_id TEXT PRIMARY KEY,
                     project_item_id TEXT NOT NULL,
                     ready_generation INTEGER NOT NULL,
+                    event_id TEXT,
+                    occurred_at TEXT,
                     comment_id TEXT,
                     confirmed INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(project_item_id, ready_generation)
                 );
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(board_dispatch)")}
+            if "event_id" not in columns:
+                db.execute("ALTER TABLE board_dispatch ADD COLUMN event_id TEXT")
+            if "occurred_at" not in columns:
+                db.execute("ALTER TABLE board_dispatch ADD COLUMN occurred_at TEXT")
 
     def prepare(self, story: ProjectStory, ready_status: str) -> Dispatch | None:
         with self._connect() as db:
@@ -113,17 +122,23 @@ class DispatchStore:
             if story.status_option_id != ready_status:
                 return None
             row = db.execute(
-                "SELECT dispatch_id, ready_generation FROM board_dispatch WHERE project_item_id = ? AND ready_generation = ?",
+                "SELECT dispatch_id, ready_generation, event_id, occurred_at FROM board_dispatch WHERE project_item_id = ? AND ready_generation = ?",
                 (story.project_item_id, generation),
             ).fetchone()
             if row is None:
                 dispatch_id = _uuid7()
+                event_id = _uuid7()
+                occurred_at = datetime.now(timezone.utc).isoformat()
                 db.execute(
-                    "INSERT INTO board_dispatch(dispatch_id, project_item_id, ready_generation) VALUES (?, ?, ?)",
-                    (dispatch_id, story.project_item_id, generation),
+                    "INSERT INTO board_dispatch(dispatch_id, project_item_id, ready_generation, event_id, occurred_at) VALUES (?, ?, ?, ?, ?)",
+                    (dispatch_id, story.project_item_id, generation, event_id, occurred_at),
                 )
-                return Dispatch(dispatch_id, story.project_item_id, generation)
-            return Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"])
+                return Dispatch(dispatch_id, story.project_item_id, generation, event_id, occurred_at)
+            event_id, occurred_at = row["event_id"], row["occurred_at"]
+            if not event_id or not occurred_at:
+                event_id, occurred_at = _uuid7(), datetime.now(timezone.utc).isoformat()
+                db.execute("UPDATE board_dispatch SET event_id = ?, occurred_at = ? WHERE dispatch_id = ?", (event_id, occurred_at, row["dispatch_id"]))
+            return Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"], event_id, occurred_at)
 
     def record_comment(self, dispatch_id: str, comment_id: str) -> None:
         with self._connect() as db:
@@ -146,10 +161,15 @@ class DispatchStore:
             return None
         with self._connect() as db:
             row = db.execute(
-                "SELECT dispatch_id, ready_generation FROM board_dispatch WHERE dispatch_id = ? AND project_item_id = ?",
+                "SELECT dispatch_id, ready_generation, event_id, occurred_at FROM board_dispatch WHERE dispatch_id = ? AND project_item_id = ?",
                 (story.dispatch_id, story.project_item_id),
             ).fetchone()
-        return None if row is None else Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"])
+        if row is None:
+            return None
+        event_id, occurred_at = row["event_id"], row["occurred_at"]
+        if not event_id or not occurred_at:
+            return None
+        return Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"], event_id, occurred_at)
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self._path)
@@ -235,8 +255,8 @@ class TaskBoardAdapter:
 
 def _claim_comment(dispatch: Dispatch, story: ProjectStory) -> str:
     event = {
-        "event_id": _uuid7(), "dispatch_id": dispatch.dispatch_id, "kind": "dispatch.claimed",
-        "occurred_at": datetime.now(timezone.utc).isoformat(), "schema_version": 1,
+        "event_id": dispatch.event_id, "dispatch_id": dispatch.dispatch_id, "kind": "dispatch.claimed",
+        "occurred_at": dispatch.occurred_at, "schema_version": 1,
         "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
     }
     return "<!-- adk-event:v1\n" + json.dumps(event, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
@@ -258,6 +278,7 @@ def _is_claim_comment(body: str, dispatch: Dispatch, story: ProjectStory) -> boo
         isinstance(event, dict)
         and event.get("kind") == "dispatch.claimed"
         and event.get("schema_version") == 1
+        and event.get("event_id") == dispatch.event_id
         and event.get("dispatch_id") == dispatch.dispatch_id
         and event.get("payload") == {"project_item_id": story.project_item_id, "status": "In Progress"}
         and isinstance(event.get("event_id"), str)
