@@ -44,3 +44,12 @@ def test_project_configuration_is_constructed_only_when_all_protocol_ids_are_pre
     config = ServiceConfig.from_environment()
 
     assert config.board_config() == BoardConfig("PVT_1", "owner", "repo", "ready", "progress", "blocked")
+
+
+def test_project_writer_requires_pinned_status_and_dispatch_field_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADK_AGENTS_DATA_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ADK_AGENTS_GITHUB_PROJECT_ID", "PVT_1")
+    monkeypatch.setenv("ADK_AGENTS_GITHUB_STATUS_FIELD_ID", "status-field")
+    monkeypatch.setenv("ADK_AGENTS_GITHUB_DISPATCH_FIELD_ID", "dispatch-field")
+
+    assert ServiceConfig.from_environment().project_writer_fields() == ("status-field", "dispatch-field")

@@ -19,6 +19,8 @@ class ServiceConfig:
     ready_option_id: str | None
     in_progress_option_id: str | None
     blocked_option_id: str | None
+    github_status_field_id: str | None
+    github_dispatch_field_id: str | None
     github_token_env: str
 
     @classmethod
@@ -31,14 +33,18 @@ class ServiceConfig:
         ready = os.environ.get("ADK_AGENTS_READY_OPTION_ID")
         progress = os.environ.get("ADK_AGENTS_IN_PROGRESS_OPTION_ID")
         blocked = os.environ.get("ADK_AGENTS_BLOCKED_OPTION_ID")
+        status_field = os.environ.get("ADK_AGENTS_GITHUB_STATUS_FIELD_ID")
+        dispatch_field = os.environ.get("ADK_AGENTS_GITHUB_DISPATCH_FIELD_ID")
         if any((owner, repository)) and not all((project_id, owner, repository)):
             raise ValueError("GitHub Project configuration requires project ID, owner, and repository together")
         if any((ready, progress, blocked)) and not all((project_id, owner, repository, ready, progress, blocked)):
             raise ValueError("GitHub board configuration requires all Project and status option IDs")
+        if any((status_field, dispatch_field)) and not all((project_id, status_field, dispatch_field)):
+            raise ValueError("GitHub Project writer configuration requires project, Status field, and Dispatch ID field IDs")
         token_env = os.environ.get("ADK_AGENTS_GITHUB_TOKEN_ENV", "GITHUB_TOKEN")
         if not token_env.isidentifier():
             raise ValueError("GitHub token configuration must name an environment variable")
-        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, token_env)
+        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, dispatch_field, token_env)
 
     def board_config(self) -> BoardConfig | None:
         if self.github_project_id is None:
@@ -46,3 +52,11 @@ class ServiceConfig:
         if not all((self.github_owner, self.github_repository, self.ready_option_id, self.in_progress_option_id, self.blocked_option_id)):
             raise ValueError("GitHub Project status option IDs are required for dispatch")
         return BoardConfig(self.github_project_id, self.github_owner, self.github_repository, self.ready_option_id, self.in_progress_option_id, self.blocked_option_id)
+
+    def project_writer_fields(self) -> tuple[str, str] | None:
+        """Pinned field IDs required before the service may mutate a Project."""
+        if self.github_status_field_id is None and self.github_dispatch_field_id is None:
+            return None
+        if self.github_status_field_id is None or self.github_dispatch_field_id is None:
+            raise ValueError("GitHub Project writer requires both field IDs")
+        return self.github_status_field_id, self.github_dispatch_field_id
