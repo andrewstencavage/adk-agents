@@ -14,6 +14,21 @@ on 2026-07-17.
 - Both health endpoints responded successfully, and host listener inspection
   showed Ollama bound to `127.0.0.1` only.
 
+## Captured inventory summary
+
+- Ollama: `0.31.1`
+  - `deepseek-64k:latest`
+  - `deepseek-r1:7b`
+  - `llama3.1:8b`
+- LM Studio: `9902c3a`
+  - `text-embedding-nomic-embed-text-v1.5`
+
+The detailed native API capture remains at
+`var/provisioning/initial-runtime-inventory.json` on the target host. It is
+intentionally ignored because it is a host-specific operational record. This
+summary contains only the safe model identifiers and runtime versions needed to
+reproduce the next capability-assessment step.
+
 ## Corrections validated
 
 The original bootstrap exposed two portability defects during this run:
