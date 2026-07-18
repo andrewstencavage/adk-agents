@@ -1,4 +1,6 @@
-from adk_agents.github_project_reader import GitHubProjectReader
+import pytest
+
+from adk_agents.github_project_reader import GitHubProjectFieldWriter, GitHubProjectReader
 from adk_agents.task_board import BoardConfig
 
 
@@ -20,3 +22,23 @@ def test_reader_returns_only_open_managed_ready_story_candidates():
     assert len(stories) == 1
     assert stories[0].issue_number == 15
     assert stories[0].primary_specialist == "Research"
+
+
+class RecordingGraphQL:
+    def __init__(self): self.calls = []
+    def execute(self, query, variables):
+        self.calls.append((query, variables))
+        return {"data": {}}
+
+
+def test_project_field_writer_allows_only_dispatch_and_safe_agent_statuses():
+    graphql = RecordingGraphQL()
+    writer = GitHubProjectFieldWriter(graphql, project_id="project", status_field_id="status", dispatch_field_id="dispatch", in_progress_option_id="progress", blocked_option_id="blocked")
+
+    writer.set_dispatch_id("item", "dispatch-0001")
+    writer.set_status("item", "progress")
+
+    assert graphql.calls[0][1]["value"] == {"text": "dispatch-0001"}
+    assert graphql.calls[1][1]["value"] == {"singleSelectOptionId": "progress"}
+    with pytest.raises(PermissionError):
+        writer.set_status("item", "ready")
