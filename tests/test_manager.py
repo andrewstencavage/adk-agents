@@ -39,6 +39,8 @@ def test_accepts_valid_bounded_task_and_records_redacted_trace(tmp_path):
     assert entry["dispatch_id"] == "dispatch-0001"
     assert entry["request_digest"].startswith("sha256:")
     assert "Summarize" not in str(entry)
+    ledger = store.ledger_entries()[-1]
+    assert (ledger["dispatch_id"], ledger["action_type"]) == ("dispatch-0001", "manager_accepted")
 
 
 def test_denies_malformed_task_before_specialist_execution(tmp_path):

@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .evidence import EvidenceLedger
+from .operational_record import OperationalRecord
+
 
 def _digest(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
@@ -22,6 +25,9 @@ class TraceStore:
     def __init__(self, database_path: str | Path) -> None:
         self._path = Path(database_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._record = OperationalRecord(self._path)
+        self._record.startup()
+        self._ledger = EvidenceLedger(self._record)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -65,12 +71,28 @@ class TraceStore:
                     error_class,
                 ),
             )
+        self._ledger.append(
+            action_type=f"manager_{decision}",
+            input_value=request,
+            output_value=result,
+            dispatch_id=dispatch_id,
+            outcome_class=decision,
+            error_class=error_class,
+        )
 
     def entries(self) -> list[dict[str, str | None]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT dispatch_id, specialist, decision, request_digest, result_digest, error_class "
                 "FROM manager_admission_trace ORDER BY created_at"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ledger_entries(self) -> list[dict[str, str | None]]:
+        """Return the redacted operational ledger for audit inspection."""
+        with self._record.connection() as connection:
+            rows = connection.execute(
+                "SELECT dispatch_id, action_type, input_digest, output_digest FROM evidence_ledger ORDER BY created_at"
             ).fetchall()
         return [dict(row) for row in rows]
 
