@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from uuid import UUID
 
 from adk_agents.task_board import (
@@ -108,6 +109,19 @@ def test_prepared_dispatch_persists_a_uuid7_claim_event_across_restart(tmp_path)
     assert first is not None and second is not None
     assert first.event_id == second.event_id
     assert UUID(first.event_id).version == 7
+
+
+def test_claim_persists_the_reconciled_comment_body_digest(tmp_path):
+    gateway = FakeBoardGateway(ready_story())
+    database = tmp_path / "record.sqlite3"
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(database))
+    dispatch = adapter.claim_ready_story(gateway.story)
+    assert dispatch is not None
+
+    with DispatchStore(database)._connect() as connection:
+        row = connection.execute("SELECT comment_id, comment_digest FROM board_dispatch WHERE dispatch_id = ?", (dispatch.dispatch_id,)).fetchone()
+    assert row["comment_id"] == "comment-1"
+    assert row["comment_digest"] == hashlib.sha256(gateway.comments[0].body.encode()).hexdigest()
 
 
 def test_user_comment_with_only_a_dispatch_id_cannot_satisfy_claim_reconciliation(tmp_path):

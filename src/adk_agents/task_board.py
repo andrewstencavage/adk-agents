@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
 import time
@@ -94,6 +95,7 @@ class DispatchStore:
                     event_id TEXT,
                     occurred_at TEXT,
                     comment_id TEXT,
+                    comment_digest TEXT,
                     confirmed INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(project_item_id, ready_generation)
                 );
@@ -104,6 +106,8 @@ class DispatchStore:
                 db.execute("ALTER TABLE board_dispatch ADD COLUMN event_id TEXT")
             if "occurred_at" not in columns:
                 db.execute("ALTER TABLE board_dispatch ADD COLUMN occurred_at TEXT")
+            if "comment_digest" not in columns:
+                db.execute("ALTER TABLE board_dispatch ADD COLUMN comment_digest TEXT")
 
     def prepare(self, story: ProjectStory, ready_status: str) -> Dispatch | None:
         with self._connect() as db:
@@ -140,9 +144,12 @@ class DispatchStore:
                 db.execute("UPDATE board_dispatch SET event_id = ?, occurred_at = ? WHERE dispatch_id = ?", (event_id, occurred_at, row["dispatch_id"]))
             return Dispatch(row["dispatch_id"], story.project_item_id, row["ready_generation"], event_id, occurred_at)
 
-    def record_comment(self, dispatch_id: str, comment_id: str) -> None:
+    def record_comment(self, dispatch_id: str, comment_id: str, body: str) -> None:
         with self._connect() as db:
-            db.execute("UPDATE board_dispatch SET comment_id = ? WHERE dispatch_id = ?", (comment_id, dispatch_id))
+            db.execute(
+                "UPDATE board_dispatch SET comment_id = ?, comment_digest = ? WHERE dispatch_id = ?",
+                (comment_id, hashlib.sha256(body.encode()).hexdigest(), dispatch_id),
+            )
 
     def has_comment(self, dispatch_id: str) -> bool:
         with self._connect() as db:
@@ -200,18 +207,18 @@ class TaskBoardAdapter:
             current = self._gateway.get_story(candidate.project_item_id)
             if not self._is_ready(current):
                 return None
-            if not self._store.has_comment(dispatch.dispatch_id):
-                comment_id = next(
-                    (
-                        comment.comment_id
-                        for comment in self._gateway.list_comments(current.issue_node_id)
-                        if _is_claim_comment(comment.body, dispatch, current)
-                    ),
-                    None,
-                )
-                if comment_id is None:
-                    comment_id = self._gateway.add_comment(current.issue_node_id, _claim_comment(dispatch, current))
-                self._store.record_comment(dispatch.dispatch_id, comment_id)
+            comment = next(
+                (
+                    comment
+                    for comment in self._gateway.list_comments(current.issue_node_id)
+                    if _is_claim_comment(comment.body, dispatch, current)
+                ),
+                None,
+            )
+            if comment is None:
+                body = _claim_comment(dispatch, current)
+                comment = BoardComment(self._gateway.add_comment(current.issue_node_id, body), body)
+            self._store.record_comment(dispatch.dispatch_id, comment.comment_id, comment.body)
             current = self._gateway.get_story(candidate.project_item_id)
             if not self._is_ready(current):
                 return None
