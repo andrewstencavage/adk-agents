@@ -170,6 +170,7 @@ class TaskBoardAdapter:
             existing = self._store.existing(candidate)
             if existing is not None and candidate.status_option_id == self._config.in_progress_option_id:
                 self._store.confirm(existing.dispatch_id)
+                self._store.observe_status(candidate.project_item_id, candidate.status_option_id)
                 return existing
             if not self._is_managed(candidate):
                 return None

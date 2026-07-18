@@ -161,6 +161,10 @@ def test_restart_confirms_a_persisted_in_progress_claim_intent(tmp_path):
     recovered = TaskBoardAdapter(CONFIG, gateway, DispatchStore(database)).claim_ready_story(gateway.story)
 
     assert recovered == dispatch
+    gateway.story = replace(gateway.story, status_option_id="ready", dispatch_id=None)
+    next_dispatch = TaskBoardAdapter(CONFIG, gateway, DispatchStore(database)).claim_ready_story(gateway.story)
+    assert next_dispatch is not None
+    assert next_dispatch.dispatch_id != dispatch.dispatch_id
 
 
 def test_a_later_ready_transition_gets_a_new_dispatch(tmp_path):
