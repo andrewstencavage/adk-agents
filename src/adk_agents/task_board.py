@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
+from .operational_record import OperationalRecord
 
 
 def _uuid7() -> str:
@@ -80,35 +81,7 @@ class DispatchStore:
 
     def __init__(self, database_path: str | Path) -> None:
         self._path = Path(database_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS board_observation (
-                    project_item_id TEXT PRIMARY KEY,
-                    last_status TEXT NOT NULL,
-                    ready_generation INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS board_dispatch (
-                    dispatch_id TEXT PRIMARY KEY,
-                    project_item_id TEXT NOT NULL,
-                    ready_generation INTEGER NOT NULL,
-                    event_id TEXT,
-                    occurred_at TEXT,
-                    comment_id TEXT,
-                    comment_digest TEXT,
-                    confirmed INTEGER NOT NULL DEFAULT 0,
-                    UNIQUE(project_item_id, ready_generation)
-                );
-                """
-            )
-            columns = {row[1] for row in db.execute("PRAGMA table_info(board_dispatch)")}
-            if "event_id" not in columns:
-                db.execute("ALTER TABLE board_dispatch ADD COLUMN event_id TEXT")
-            if "occurred_at" not in columns:
-                db.execute("ALTER TABLE board_dispatch ADD COLUMN occurred_at TEXT")
-            if "comment_digest" not in columns:
-                db.execute("ALTER TABLE board_dispatch ADD COLUMN comment_digest TEXT")
+        OperationalRecord(self._path).startup()
 
     def prepare(self, story: ProjectStory, ready_status: str) -> Dispatch | None:
         with self._connect() as db:
