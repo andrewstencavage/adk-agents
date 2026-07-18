@@ -29,6 +29,7 @@ class FakeBoardGateway:
         self.comments: list[BoardComment] = []
         self.status_writes: list[str] = []
         self.dispatch_writes: list[str] = []
+        self.summary_writes: list[str] = []
 
     def get_story(self, project_item_id: str) -> ProjectStory:
         assert project_item_id == self.story.project_item_id
@@ -48,6 +49,10 @@ class FakeBoardGateway:
         assert project_item_id == self.story.project_item_id
         self.dispatch_writes.append(dispatch_id)
         self.story = replace(self.story, dispatch_id=dispatch_id)
+
+    def set_agent_summary(self, project_item_id: str, summary: str) -> None:
+        assert project_item_id == self.story.project_item_id
+        self.summary_writes.append(summary)
 
     def set_status(self, project_item_id: str, option_id: str) -> None:
         assert project_item_id == self.story.project_item_id
@@ -230,5 +235,6 @@ def test_unassessed_model_block_is_visible_on_the_claimed_story(tmp_path):
 
     assert gateway.story.status_option_id == "blocked"
     assert gateway.status_writes == ["in-progress", "blocked"]
+    assert gateway.summary_writes == ["No eligible assessed model."]
     assert "story.blocked" in gateway.comments[-1].body
     assert "No eligible assessed model." in gateway.comments[-1].body

@@ -36,15 +36,19 @@ class GitHubProjectFieldWriter:
     no operation for Ready or Done: those remain human-only board transitions.
     """
 
-    def __init__(self, graphql: GraphQLTransport, *, project_id: str, status_field_id: str, dispatch_field_id: str, in_progress_option_id: str, blocked_option_id: str) -> None:
+    def __init__(self, graphql: GraphQLTransport, *, project_id: str, status_field_id: str, dispatch_field_id: str, agent_summary_field_id: str, in_progress_option_id: str, blocked_option_id: str) -> None:
         self._graphql = graphql
         self._project_id = project_id
         self._status_field_id = status_field_id
         self._dispatch_field_id = dispatch_field_id
+        self._agent_summary_field_id = agent_summary_field_id
         self._allowed_statuses = frozenset({in_progress_option_id, blocked_option_id})
 
     def set_dispatch_id(self, project_item_id: str, dispatch_id: str) -> None:
         self._set(project_item_id, self._dispatch_field_id, {"text": dispatch_id})
+
+    def set_agent_summary(self, project_item_id: str, summary: str) -> None:
+        self._set(project_item_id, self._agent_summary_field_id, {"text": summary})
 
     def set_status(self, project_item_id: str, option_id: str) -> None:
         if option_id not in self._allowed_statuses:
@@ -169,6 +173,9 @@ class GitHubTaskBoardGateway:
 
     def set_dispatch_id(self, project_item_id: str, dispatch_id: str) -> None:
         self._writer.set_dispatch_id(project_item_id, dispatch_id)
+
+    def set_agent_summary(self, project_item_id: str, summary: str) -> None:
+        self._writer.set_agent_summary(project_item_id, summary)
 
     def set_status(self, project_item_id: str, option_id: str) -> None:
         self._writer.set_status(project_item_id, option_id)

@@ -57,7 +57,7 @@ class RecordingGraphQL:
 
 def test_project_field_writer_allows_only_dispatch_and_safe_agent_statuses():
     graphql = RecordingGraphQL()
-    writer = GitHubProjectFieldWriter(graphql, project_id="project", status_field_id="status", dispatch_field_id="dispatch", in_progress_option_id="progress", blocked_option_id="blocked")
+    writer = GitHubProjectFieldWriter(graphql, project_id="project", status_field_id="status", dispatch_field_id="dispatch", agent_summary_field_id="summary", in_progress_option_id="progress", blocked_option_id="blocked")
 
     writer.set_dispatch_id("item", "dispatch-0001")
     writer.set_status("item", "progress")
