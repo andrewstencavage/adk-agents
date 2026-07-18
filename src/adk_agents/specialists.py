@@ -25,6 +25,7 @@ class ResearchReport:
     claims: tuple[CitedClaim, ...]
     uncertainty: str
     evidence_refs: tuple[str, ...] = ()
+    exhausted: bool = False
 
 
 class RateLimited(RuntimeError):
@@ -46,7 +47,10 @@ class ResearchSpecialist:
                 return ResearchReport(claims, "Sources may be incomplete.", evidence_refs)
             except RateLimited:
                 if attempt + 1 == self._max_attempts:
-                    raise RuntimeError("research rate-limit retry policy exhausted") from None
+                    report = ResearchReport((), "Research rate-limit retry policy exhausted; no provider fallback was used.", exhausted=True)
+                    if self._evidence_writer is not None:
+                        return ResearchReport(report.claims, report.uncertainty, (self._evidence_writer({"question": question, "exhausted": True}),), True)
+                    return report
                 self._wait(self._retry_delay_seconds)
         raise AssertionError("unreachable")
 
