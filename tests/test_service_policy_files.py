@@ -8,6 +8,7 @@ def test_systemd_service_uses_dedicated_identity_and_bounded_restart_policy():
     assert "RestartSec=10" in unit
     assert "[Unit]\nDescription=ADK agents local service\nStartLimitIntervalSec=600\nStartLimitBurst=3" in unit
     assert "-m adk_agents.service" in unit
+    assert "EnvironmentFile=/etc/adk-agents/adk-agents.env" in unit
 
 
 def test_journal_policy_has_the_specified_time_and_size_bounds():

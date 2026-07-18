@@ -10,6 +10,7 @@ Type=simple
 User=adk-agents
 Group=adk-agents
 WorkingDirectory=/var/lib/adk-agents
+EnvironmentFile=/etc/adk-agents/adk-agents.env
 ExecStart=/var/lib/adk-agents/venv/bin/python -m adk_agents.service
 Restart=on-failure
 RestartSec=10
