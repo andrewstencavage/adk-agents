@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 class RecordIntegrityError(RuntimeError):
@@ -45,6 +46,10 @@ _MIGRATION_6_STATEMENTS = (
     "CREATE TABLE model_outcome (outcome_id TEXT PRIMARY KEY, dispatch_id TEXT NOT NULL, role TEXT NOT NULL, runtime_id TEXT NOT NULL, model_id TEXT NOT NULL, fingerprint TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL)",
 )
 _MIGRATION_6 = "\n".join(_MIGRATION_6_STATEMENTS)
+_MIGRATION_7_STATEMENTS = (
+    "CREATE TABLE polling_lease (project_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, expires_at TEXT NOT NULL)",
+)
+_MIGRATION_7 = "\n".join(_MIGRATION_7_STATEMENTS)
 
 
 class OperationalRecord:
@@ -58,7 +63,7 @@ class OperationalRecord:
         with self.connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migration (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)")
-            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4), (5, _MIGRATION_5_STATEMENTS, _MIGRATION_5), (6, _MIGRATION_6_STATEMENTS, _MIGRATION_6)):
+            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4), (5, _MIGRATION_5_STATEMENTS, _MIGRATION_5), (6, _MIGRATION_6_STATEMENTS, _MIGRATION_6), (7, _MIGRATION_7_STATEMENTS, _MIGRATION_7)):
                 checksum = hashlib.sha256(migration.encode()).hexdigest()
                 existing = connection.execute("SELECT checksum FROM schema_migration WHERE version = ?", (version,)).fetchone()
                 if existing is not None and existing[0] != checksum:
@@ -101,7 +106,30 @@ class OperationalRecord:
         foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         triggers = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
-        required_tables = {"schema_migration", "artifact_manifest", "evidence_ledger", "cleanup_run", "model_assessment", "model_selection", "model_outcome", "dispatch", "invocation_trace", "poll_checkpoint", "operational_incident", "story_handoff"}
+        required_tables = {"schema_migration", "artifact_manifest", "evidence_ledger", "cleanup_run", "model_assessment", "model_selection", "model_outcome", "dispatch", "invocation_trace", "poll_checkpoint", "polling_lease", "operational_incident", "story_handoff"}
         required_triggers = {"evidence_ledger_append_only", "evidence_ledger_no_delete"}
         if integrity != "ok" or foreign_keys or not required_tables <= tables or not required_triggers <= triggers:
             raise RecordIntegrityError("SQLite integrity safeguards failed")
+
+
+class PollingLease:
+    """A renewable, project-scoped SQLite lease for the sole polling worker."""
+
+    def __init__(self, record: OperationalRecord, *, project_id: str, owner_id: str, duration: timedelta = timedelta(seconds=90), now: Callable[[], datetime] | None = None) -> None:
+        if not project_id or not owner_id or duration <= timedelta():
+            raise ValueError("polling lease requires project, owner, and positive duration")
+        self._record, self._project_id, self._owner_id = record, project_id, owner_id
+        self._duration, self._now = duration, now or (lambda: datetime.now(timezone.utc))
+
+    def acquire(self) -> bool:
+        """Acquire or renew when the prior lease has expired or is already ours."""
+        now = self._now()
+        expiry = now + self._duration
+        with self._record.connection() as connection:
+            cursor = connection.execute(
+                """INSERT INTO polling_lease(project_id, owner_id, expires_at) VALUES (?, ?, ?)
+                   ON CONFLICT(project_id) DO UPDATE SET owner_id=excluded.owner_id, expires_at=excluded.expires_at
+                   WHERE polling_lease.expires_at <= ? OR polling_lease.owner_id = excluded.owner_id""",
+                (self._project_id, self._owner_id, expiry.isoformat(), now.isoformat()),
+            )
+        return cursor.rowcount == 1

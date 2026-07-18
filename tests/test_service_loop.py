@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from adk_agents.contracts import SpecialistResult, TaskStatus
-from adk_agents.service_loop import PollingService
+from adk_agents.service_loop import LeasedPollingWorker, PollingService
 from adk_agents.service_loop import task_from_issue_body
 from datetime import datetime, timedelta, timezone
 import json
@@ -56,6 +56,18 @@ def test_polling_service_runs_serial_ticks_until_the_host_stops_it():
 
     assert waits == [5]
     assert len(workflow.events) == 1
+
+
+def test_passive_worker_does_not_read_or_write_when_another_worker_holds_the_lease():
+    board, workflow = Board(), Workflow()
+    service = PollingService(board, Manager(), workflow, lambda: ["ready-story"], lambda _candidate, dispatch: {"dispatch_id": dispatch, "story_ref": "#19"})
+
+    class Lease:
+        def acquire(self): return False
+
+    assert LeasedPollingWorker(service, Lease()).tick() == 0
+    assert board.claimed == []
+    assert workflow.events == []
 
 def test_task_builder_accepts_only_the_structured_issue_block():
     raw = {"control_issue_ref":"#1","story_ref":"#20","specialist":"research","objective":"x","acceptance_criteria":["y"],"requested_by":"andrew","deadline":(datetime.now(timezone.utc)+timedelta(days=1)).isoformat(),"budget_steps":1}

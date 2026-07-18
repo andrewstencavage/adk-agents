@@ -24,6 +24,10 @@ class HandoffWorkflow(Protocol):
     def handoff(self, dispatch_id: str, status: str, result: Any) -> str | None: ...
 
 
+class PollingLease(Protocol):
+    def acquire(self) -> bool: ...
+
+
 class PollingService:
     """Never dispatches unclaimed work; adapters remain lifecycle authorities."""
 
@@ -44,6 +48,26 @@ class PollingService:
 
     def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:
         """Run serial polling ticks until the host's shutdown signal is observed."""
+        if interval_seconds <= 0:
+            raise ValueError("poll interval must be positive")
+        while not should_stop():
+            self.tick()
+            if not should_stop():
+                wait(interval_seconds)
+
+
+class LeasedPollingWorker:
+    """Runs a PollingService only while this process owns the project lease."""
+
+    def __init__(self, polling: PollingService, lease: PollingLease) -> None:
+        self._polling, self._lease = polling, lease
+
+    def tick(self) -> int:
+        if not self._lease.acquire():
+            return 0
+        return self._polling.tick()
+
+    def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:
         if interval_seconds <= 0:
             raise ValueError("poll interval must be positive")
         while not should_stop():
