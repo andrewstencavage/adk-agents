@@ -133,6 +133,18 @@ def test_router_blocks_a_stale_passing_assessment(tmp_path):
         router.select(RouteRequest(dispatch_id="dispatch-0001", role=SpecialistType.RESEARCH), [model()])
 
 
+def test_router_records_a_redacted_model_outcome_for_a_dispatch(tmp_path):
+    record = OperationalRecord(tmp_path / "record.sqlite3")
+    record.startup()
+    router = ModelRouter(record, suite_version="2026.1")
+
+    router.record_outcome("dispatch-0001", SpecialistType.RESEARCH, model(), "completed")
+
+    with record.connection() as connection:
+        row = connection.execute("SELECT dispatch_id, role, outcome FROM model_outcome").fetchone()
+    assert tuple(row) == ("dispatch-0001", "research", "completed")
+
+
 def test_manager_returns_a_visible_blocked_story_when_nothing_is_eligible(tmp_path):
     record = OperationalRecord(tmp_path / "routing.sqlite3")
     record.startup()

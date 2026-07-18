@@ -72,6 +72,13 @@ class ModelRouter:
                 (uuid7(), assessment.suite_version, assessment.model.runtime_id, assessment.model.model_id, assessment.model.fingerprint, assessment.model.runtime_version, assessment.role.value, assessment.status.value, assessment.score, assessment.artifact_ref, _now()),
             )
 
+    def record_outcome(self, dispatch_id: str, role: SpecialistType, model: ModelRef, outcome: str) -> None:
+        with self._record.connection() as connection:
+            connection.execute(
+                "INSERT INTO model_outcome VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (uuid7(), dispatch_id, role.value, model.runtime_id, model.model_id, model.fingerprint, outcome, _now()),
+            )
+
     def select(self, request: RouteRequest, inventory: list[ModelRef] | None = None) -> ModelSelection:
         candidates = inventory or []
         eligible = [model for model in candidates if self._passes_current_suite(model, request.role)]
