@@ -178,3 +178,17 @@ def test_a_later_ready_transition_gets_a_new_dispatch(tmp_path):
 
     assert second is not None
     assert second.dispatch_id != first.dispatch_id
+
+
+def test_unassessed_model_block_is_visible_on_the_claimed_story(tmp_path):
+    gateway = FakeBoardGateway(ready_story())
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "record.sqlite3"))
+    dispatch = adapter.claim_ready_story(gateway.story)
+    assert dispatch is not None
+
+    adapter.block_claimed_story(gateway.story, dispatch, "No eligible assessed model.")
+
+    assert gateway.story.status_option_id == "blocked"
+    assert gateway.status_writes == ["in-progress", "blocked"]
+    assert "story.blocked" in gateway.comments[-1].body
+    assert "No eligible assessed model." in gateway.comments[-1].body

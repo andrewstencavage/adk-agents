@@ -8,14 +8,33 @@ from pathlib import Path
 from .config import ServiceConfig
 from .operational_record import OperationalRecord
 from .manager import Manager, accepted_result
+from .contracts import SpecialistType
+from .routing import ModelRouter
 from .trace import TraceStore
-from .service_loop import PollingService, task_from_issue_body
+from .service_loop import LeasedPollingWorker, PollingService, task_from_issue_body
+from .task_board import DispatchStore, TaskBoardAdapter
+from .github_project_reader import GitHubGraphQLTransport, GitHubIssueBodyReader, GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway
+from .integration import ApprovedStoryWorkflow
+from .evidence import EvidenceLedger
+from .ids import uuid7
+from .operational_record import PollingLease
 
 
 def build_mock_manager(data_dir: Path) -> Manager:
     """Explicit no-model Manager used only until capability assessments exist."""
     handlers = {"scrum_master": accepted_result, "research": accepted_result, "coding": accepted_result, "review": accepted_result}
     return Manager(TraceStore(data_dir / "record.sqlite3"), handlers)
+
+
+def build_assessment_gated_manager(record: OperationalRecord, data_dir: Path) -> Manager:
+    """Create the static specialist registry behind an empty assessed inventory.
+
+    No local model becomes eligible merely because the service is installed.
+    The ModelRouter records a blocked decision until a capability assessment has
+    supplied a current exact-fingerprint candidate.
+    """
+    handlers = {role.value: accepted_result for role in SpecialistType}
+    return Manager(TraceStore(data_dir / "manager.sqlite3"), handlers, router=ModelRouter(record, suite_version="2026.1"), inventory=lambda: [])
 
 
 def build_task_for(issue_body_reader):
@@ -30,6 +49,40 @@ def build_polling_service(board, manager, workflow, project_reader, issue_body_r
     )
 
 
+def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) -> LeasedPollingWorker:
+    """Compose the constrained GitHub board and assessment-gated dispatch path.
+
+    This is selected only by explicit ``ADK_AGENTS_SERVICE_MODE=live``. With no
+    passing capability assessment it claims a Ready story, records a redacted
+    handoff, and moves that matching story to Blocked rather than executing a
+    specialist handler.
+    """
+    board_config = config.board_config()
+    writer_fields = config.project_writer_fields()
+    if board_config is None or writer_fields is None:
+        raise ValueError("live polling requires complete GitHub Project configuration")
+    project_token = os.environ.get(config.github_project_token_env)
+    issues_token = os.environ.get(config.github_issues_token_env)
+    if not project_token or not issues_token:
+        raise ValueError("live polling requires configured Project and Issues credentials")
+    status_field_id, dispatch_field_id = writer_fields
+    project_graphql = GitHubGraphQLTransport(project_token)
+    reader = GitHubProjectReader(board_config, project_graphql, dispatch_field_id=dispatch_field_id)
+    writer = GitHubProjectFieldWriter(
+        project_graphql, project_id=board_config.project_id, status_field_id=status_field_id,
+        dispatch_field_id=dispatch_field_id, in_progress_option_id=board_config.in_progress_option_id,
+        blocked_option_id=board_config.blocked_option_id,
+    )
+    gateway = GitHubTaskBoardGateway(reader, writer, GitHubIssueComments(issues_token, board_config.owner, board_config.repository))
+    board = TaskBoardAdapter(board_config, gateway, DispatchStore(record.path))
+    workflow = ApprovedStoryWorkflow(EvidenceLedger(record), lambda _event: None)
+    polling = build_polling_service(
+        board, build_assessment_gated_manager(record, config.data_dir), workflow, reader,
+        GitHubIssueBodyReader(issues_token, board_config.owner, board_config.repository),
+    )
+    return LeasedPollingWorker(polling, PollingLease(record, project_id=board_config.project_id, owner_id=uuid7()))
+
+
 def run_mock_polling_loop() -> None:
     """Keep the supervised service alive without touching GitHub or any model."""
     class Noop:
@@ -39,13 +92,23 @@ def run_mock_polling_loop() -> None:
     PollingService(Noop(), Noop(), Noop(), lambda: (), lambda *_: {}).run_forever(interval_seconds=60)
 
 
+def run_live_polling_loop(config: ServiceConfig, record: OperationalRecord) -> None:
+    build_live_polling_worker(config, record).run_forever(interval_seconds=60)
+
+
 def main() -> None:
     """Run startup checks and, only when explicit, a safe no-op supervised poller."""
     config = ServiceConfig.from_environment()
     config.backup_dir.mkdir(parents=True, exist_ok=True)
-    OperationalRecord(config.data_dir / "record.sqlite3").startup()
-    if os.environ.get("ADK_AGENTS_SERVICE_MODE") == "mock":
+    record = OperationalRecord(config.data_dir / "record.sqlite3")
+    record.startup()
+    mode = os.environ.get("ADK_AGENTS_SERVICE_MODE")
+    if mode == "mock":
         run_mock_polling_loop()
+    elif mode == "live":
+        run_live_polling_loop(config, record)
+    elif mode not in (None, ""):
+        raise ValueError("ADK_AGENTS_SERVICE_MODE must be mock or live")
 
 
 if __name__ == "__main__":

@@ -207,6 +207,22 @@ class TaskBoardAdapter:
                 return dispatch
             return None
 
+    def block_claimed_story(self, candidate: ProjectStory, dispatch: Dispatch, summary: str) -> bool:
+        """Make an assessment gate refusal visible without overriding a user change."""
+        with self._claim_lock:
+            current = self._gateway.get_story(candidate.project_item_id)
+            if not self._is_managed(current) or current.status_option_id != self._config.in_progress_option_id:
+                return False
+            if current.dispatch_id != dispatch.dispatch_id:
+                return False
+            self._gateway.add_comment(current.issue_node_id, _blocked_comment(dispatch, current, summary))
+            current = self._gateway.get_story(candidate.project_item_id)
+            if current.status_option_id != self._config.in_progress_option_id or current.dispatch_id != dispatch.dispatch_id:
+                return False
+            self._gateway.set_status(current.project_item_id, self._config.blocked_option_id)
+            self._store.observe_status(current.project_item_id, self._config.blocked_option_id)
+            return True
+
     def _is_managed(self, story: ProjectStory) -> bool:
         return (
             story.project_id == self._config.project_id and story.owner == self._config.owner
@@ -224,3 +240,12 @@ def _claim_comment(dispatch: Dispatch, story: ProjectStory) -> str:
         "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
     }
     return "<!-- adk-event:v1\n" + json.dumps(event, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
+
+
+def _blocked_comment(dispatch: Dispatch, story: ProjectStory, summary: str) -> str:
+    event = {
+        "event_id": _uuid7(), "dispatch_id": dispatch.dispatch_id, "kind": "story.blocked",
+        "occurred_at": datetime.now(timezone.utc).isoformat(), "schema_version": 1,
+        "payload": {"project_item_id": story.project_item_id, "status": "Blocked"},
+    }
+    return "<!-- adk-event:v1\n" + json.dumps(event, separators=(",", ":")) + "\n-->\n## Agent update · Blocked\n\n" + summary

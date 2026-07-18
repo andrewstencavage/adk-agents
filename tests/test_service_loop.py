@@ -17,10 +17,15 @@ class Dispatch:
 class Board:
     def __init__(self):
         self.claimed = []
+        self.blocked = []
 
     def claim_ready_story(self, candidate):
         self.claimed.append(candidate)
         return Dispatch("dispatch-0001")
+
+    def block_claimed_story(self, candidate, dispatch, summary):
+        self.blocked.append((candidate, dispatch.dispatch_id, summary))
+        return True
 
 
 class Manager:
@@ -33,6 +38,9 @@ class Workflow:
     def __init__(self):
         self.events = []
 
+    def dispatch(self, dispatch_id, story_ref, request):
+        self.events.append((dispatch_id, "dispatch", story_ref, request))
+
     def handoff(self, dispatch_id, status, result):
         self.events.append((dispatch_id, status, result))
 
@@ -43,7 +51,22 @@ def test_polling_service_claims_only_then_admits_and_records_a_durable_handoff()
 
     assert service.tick() == 1
     assert board.claimed == ["ready-story"]
-    assert workflow.events[0][:2] == ("dispatch-0001", "completed")
+    assert workflow.events[0][:3] == ("dispatch-0001", "dispatch", "#19")
+    assert workflow.events[1][:2] == ("dispatch-0001", "completed")
+
+
+def test_no_eligible_model_blocks_the_claimed_story_after_recording_the_handoff():
+    class BlockedManager:
+        def admit(self, _task):
+            return SpecialistResult(status=TaskStatus.BLOCKED, summary="No eligible assessed model.", next_manager_action="create_blocked_story")
+
+    board, workflow = Board(), Workflow()
+    service = PollingService(board, BlockedManager(), workflow, lambda: ["ready-story"], lambda _candidate, dispatch: {"dispatch_id": dispatch, "story_ref": "#19"})
+
+    assert service.tick() == 1
+    assert workflow.events[0][:3] == ("dispatch-0001", "dispatch", "#19")
+    assert workflow.events[1][:2] == ("dispatch-0001", "blocked")
+    assert board.blocked == [("ready-story", "dispatch-0001", "No eligible assessed model.")]
 
 
 def test_polling_service_runs_serial_ticks_until_the_host_stops_it():
@@ -55,7 +78,7 @@ def test_polling_service_runs_serial_ticks_until_the_host_stops_it():
     service.run_forever(interval_seconds=5, should_stop=lambda: next(stops), wait=waits.append)
 
     assert waits == [5]
-    assert len(workflow.events) == 1
+    assert len(workflow.events) == 2
 
 
 def test_passive_worker_does_not_read_or_write_when_another_worker_holds_the_lease():

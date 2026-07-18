@@ -14,6 +14,7 @@ def task_from_issue_body(body: str, dispatch_id: str) -> dict[str, Any]:
 
 class ClaimingBoard(Protocol):
     def claim_ready_story(self, candidate: object) -> object | None: ...
+    def block_claimed_story(self, candidate: object, dispatch: object, summary: str) -> bool: ...
 
 
 class AdmittingManager(Protocol):
@@ -21,6 +22,7 @@ class AdmittingManager(Protocol):
 
 
 class HandoffWorkflow(Protocol):
+    def dispatch(self, dispatch_id: str, story_ref: str, request: Any) -> str: ...
     def handoff(self, dispatch_id: str, status: str, result: Any) -> str | None: ...
 
 
@@ -41,8 +43,12 @@ class PollingService:
             if claim is None:
                 continue
             dispatch_id = getattr(claim, "dispatch_id")
-            result = self._manager.admit(self._task_for(candidate, dispatch_id))
+            task = self._task_for(candidate, dispatch_id)
+            self._workflow.dispatch(dispatch_id, task["story_ref"], task)
+            result = self._manager.admit(task)
             self._workflow.handoff(dispatch_id, result.status.value, result.model_dump(mode="json"))
+            if result.status.value == "blocked":
+                self._board.block_claimed_story(candidate, claim, result.summary)
             dispatched += 1
         return dispatched
 
