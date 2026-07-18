@@ -10,3 +10,8 @@ def test_requires_one_valid_fenced_task_block():
     task = parse_task_block("text\n```adk-task\n" + json.dumps(payload()) + "\n```")
     assert task.story_ref == "#20"
     with pytest.raises(ValueError): parse_task_block("no block")
+
+def test_service_injects_its_dispatch_id():
+    data = payload(); data.pop("dispatch_id")
+    task = parse_task_block("```adk-task\n" + json.dumps(data) + "\n```", dispatch_id="dispatch-0002")
+    assert task.dispatch_id == "dispatch-0002"
