@@ -78,6 +78,11 @@ class EvidenceLedger:
     def __init__(self, record: OperationalRecord) -> None:
         self._record = record
 
+    @property
+    def record(self) -> OperationalRecord:
+        """The shared durable record used by the owning workflow."""
+        return self._record
+
     def append(self, *, action_type: str, input_value: Any = None, output_value: Any = None, dispatch_id: str | None = None, invocation_id: str | None = None, outcome_class: str | None = None, error_class: str | None = None, artifact_digest: str | None = None) -> str:
         event_id = str(uuid4())
         with self._record.connection() as connection:
