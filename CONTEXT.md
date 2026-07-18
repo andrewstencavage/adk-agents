@@ -151,3 +151,31 @@ _Avoid_: manual cleanup dependency, unbounded routine storage
 **Cleanup run**:
 A daily automatic maintenance operation that removes only expired, unreferenced routine evidence. It moves artifact files to a seven-day local quarantine before removing their manifest and ledger rows, then records a cleanup summary event.
 _Avoid_: immediate irreversible purge, silent retention cleanup
+
+**Service supervisor**:
+The systemd-managed, dedicated non-login Linux service account and unit that owns one installation's process lifecycle, filesystem access, and journal identity. It restarts on failure after 10 seconds and stops retrying after three failures within 10 minutes.
+_Avoid_: interactive shell process, user-login service, container orchestrator
+
+**External backup set**:
+An unencrypted, routine copy of the local system record and artifact-manifest metadata written to the target host's physically controlled external drive. It retains daily sets for 14 days and one monthly set for 12 months before automatic cleanup.
+_Avoid_: same-disk backup, permanent backup accumulation, assumed encryption
+
+**Restore verification**:
+A monthly, isolated restoration of the SQLite backup followed by integrity checks before the corresponding external backup set is reported healthy.
+_Avoid_: copy-only backup success, production-database restore test
+
+**Operational incident**:
+A persistent service, backup, or recovery failure surfaced to the user through one dedicated GitHub control issue after three consecutive failed attempts, while detailed redacted evidence remains in the local journal and evidence ledger.
+_Avoid_: transient-failure notification, raw-log GitHub issue, duplicate alert issues
+
+**Incident recovery**:
+The service's return to healthy operation, recorded as a redacted update on its operational incident; the incident closes automatically after 24 uninterrupted healthy hours.
+_Avoid_: silently recovered incident, permanently open recovered alert
+
+**Service journal retention**:
+The service's local journal history, automatically rotated after 30 days or 512 MB, whichever limit is reached first.
+_Avoid_: unbounded journal, indefinite raw operational logs
+
+**Incident-driven observability**:
+The reporting posture in which routine health remains in local metrics and logs, while GitHub receives only persistent operational incidents and their recoveries.
+_Avoid_: weekly healthy-status noise, silent persistent failure
