@@ -19,6 +19,7 @@ class ServiceConfig:
     ready_option_id: str | None
     in_progress_option_id: str | None
     blocked_option_id: str | None
+    github_token_env: str
 
     @classmethod
     def from_environment(cls) -> "ServiceConfig":
@@ -34,7 +35,10 @@ class ServiceConfig:
             raise ValueError("GitHub Project configuration requires project ID, owner, and repository together")
         if any((ready, progress, blocked)) and not all((project_id, owner, repository, ready, progress, blocked)):
             raise ValueError("GitHub board configuration requires all Project and status option IDs")
-        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked)
+        token_env = os.environ.get("ADK_AGENTS_GITHUB_TOKEN_ENV", "GITHUB_TOKEN")
+        if not token_env.isidentifier():
+            raise ValueError("GitHub token configuration must name an environment variable")
+        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, token_env)
 
     def board_config(self) -> BoardConfig | None:
         if self.github_project_id is None:

@@ -26,6 +26,7 @@ def test_service_configuration_accepts_explicit_github_and_backup_values(monkeyp
 
     assert config.backup_dir == tmp_path / "backup"
     assert (config.github_project_id, config.github_owner, config.github_repository) == ("PVT_1", "owner", "repo")
+    assert config.github_token_env == "GITHUB_TOKEN"
 
 
 def test_project_configuration_is_constructed_only_when_all_protocol_ids_are_present(monkeypatch, tmp_path):
