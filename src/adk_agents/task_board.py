@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
+
+from .contracts import SpecialistResult, TaskStatus
+from .manager import AdmissionDenied, Manager
 
 
 def _uuid7() -> str:
@@ -61,6 +66,74 @@ class Dispatch:
 class BoardComment:
     comment_id: str
     body: str
+
+
+class ResearchBlockCause(str, Enum):
+    """The two bounded Research failures surfaced by the MVP task-board flow."""
+
+    ADMISSION_DENIED = "admission_denied"
+    RUNTIME_RETRY_EXHAUSTED = "runtime_retry_exhausted"
+
+
+@dataclass(frozen=True)
+class ResearchBlock:
+    """A redacted proposed block, containing only a known cause and evidence digests."""
+
+    cause: ResearchBlockCause
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if any(re.fullmatch(r"sha256:[0-9a-f]{64}", ref) is None for ref in self.evidence_refs):
+            raise ValueError("Research block evidence must use sha256 references")
+
+    @classmethod
+    def from_admission_denial(cls, denial: SpecialistResult) -> "ResearchBlock":
+        """Convert the Manager's structured admission denial into a board-safe block."""
+        return cls._from_result(ResearchBlockCause.ADMISSION_DENIED, denial)
+
+    @classmethod
+    def from_runtime_retry_exhaustion(cls, result: SpecialistResult) -> "ResearchBlock":
+        """Convert the bounded Research runtime result into a board-safe block."""
+        return cls._from_result(ResearchBlockCause.RUNTIME_RETRY_EXHAUSTED, result)
+
+    @classmethod
+    def _from_result(cls, cause: ResearchBlockCause, result: SpecialistResult) -> "ResearchBlock":
+        if result.status is not TaskStatus.BLOCKED or result.next_manager_action != "block_story":
+            raise ValueError("only a blocked specialist result can block a Research story")
+        return cls(cause, tuple(result.evidence_refs))
+
+
+class ResearchBlockCoordinator:
+    """The narrow handoff from Manager/Research terminal results to the task board."""
+
+    def __init__(self, board: "TaskBoardAdapter") -> None:
+        self._board = board
+
+    def surface_manager_admission_denial(self, story: ProjectStory, denial: SpecialistResult) -> bool:
+        return self._board.block_research_story(story, ResearchBlock.from_admission_denial(denial))
+
+    def surface_runtime_retry_exhaustion(self, story: ProjectStory, result: SpecialistResult) -> bool:
+        return self._board.block_research_story(story, ResearchBlock.from_runtime_retry_exhaustion(result))
+
+
+class ResearchTaskBoardHandoff:
+    """Consumes actual Manager/Research terminal outcomes and surfaces required blocks."""
+
+    def __init__(self, manager: Manager, blocks: ResearchBlockCoordinator) -> None:
+        self._manager = manager
+        self._blocks = blocks
+
+    def dispatch(self, raw_task: dict[str, object], story: ProjectStory) -> SpecialistResult:
+        try:
+            result = self._manager.admit(raw_task)
+        except AdmissionDenied as error:
+            if error.denial is None:
+                raise
+            self._blocks.surface_manager_admission_denial(story, error.denial)
+            return error.denial
+        if result.status is TaskStatus.BLOCKED and result.next_manager_action == "block_story":
+            self._blocks.surface_runtime_retry_exhaustion(story, result)
+        return result
 
 
 class BoardGateway(Protocol):
@@ -207,6 +280,27 @@ class TaskBoardAdapter:
                 return dispatch
             return None
 
+    def block_research_story(self, candidate: ProjectStory, block: ResearchBlock) -> bool:
+        """Record one bounded Research failure and move only an eligible story to Blocked."""
+        with self._claim_lock:
+            if not self._is_research_story(candidate):
+                return False
+            current = self._gateway.get_story(candidate.project_item_id)
+            if not self._is_blockable(current):
+                return False
+            block_id = _research_block_id(current, block)
+            if not any(
+                f'"block_id":"{block_id}"' in comment.body
+                for comment in self._gateway.list_comments(current.issue_node_id)
+            ):
+                self._gateway.add_comment(current.issue_node_id, _research_block_comment(current, block, block_id))
+            current = self._gateway.get_story(candidate.project_item_id)
+            if not self._is_blockable(current):
+                return False
+            self._gateway.set_status(current.project_item_id, self._config.blocked_option_id)
+            final = self._gateway.get_story(candidate.project_item_id)
+            return final.status_option_id == self._config.blocked_option_id
+
     def _is_managed(self, story: ProjectStory) -> bool:
         return (
             story.project_id == self._config.project_id and story.owner == self._config.owner
@@ -216,6 +310,12 @@ class TaskBoardAdapter:
     def _is_ready(self, story: ProjectStory) -> bool:
         return self._is_managed(story) and story.status_option_id == self._config.ready_option_id and story.primary_specialist is not None
 
+    def _is_research_story(self, story: ProjectStory) -> bool:
+        return self._is_managed(story) and story.primary_specialist == "Research"
+
+    def _is_blockable(self, story: ProjectStory) -> bool:
+        return self._is_research_story(story) and story.status_option_id == self._config.in_progress_option_id
+
 
 def _claim_comment(dispatch: Dispatch, story: ProjectStory) -> str:
     event = {
@@ -224,3 +324,33 @@ def _claim_comment(dispatch: Dispatch, story: ProjectStory) -> str:
         "payload": {"project_item_id": story.project_item_id, "status": "In Progress"},
     }
     return "<!-- adk-event:v1\n" + json.dumps(event, separators=(",", ":")) + "\n-->\n## Agent update · In Progress\n\nClaim recorded."
+
+
+def _research_block_id(story: ProjectStory, block: ResearchBlock) -> str:
+    return f"{story.dispatch_id or story.project_item_id}:{block.cause.value}"
+
+
+def _research_block_comment(story: ProjectStory, block: ResearchBlock, block_id: str) -> str:
+    reason = {
+        ResearchBlockCause.ADMISSION_DENIED: "Research admission is missing or inactive.",
+        ResearchBlockCause.RUNTIME_RETRY_EXHAUSTED: "Research runtime retry was exhausted.",
+    }[block.cause]
+    event = {
+        "event_id": _uuid7(),
+        "kind": "research.blocked",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": 1,
+        "payload": {
+            "project_item_id": story.project_item_id,
+            "block_id": block_id,
+            "cause": block.cause.value,
+            "evidence_refs": list(block.evidence_refs),
+        },
+    }
+    evidence = ", ".join(block.evidence_refs) if block.evidence_refs else "None available."
+    return (
+        "<!-- adk-event:v1\n"
+        + json.dumps(event, separators=(",", ":"))
+        + "\n-->\n## Agent update · Blocked\n\n"
+        + f"Reason: {reason}\n\nEvidence: {evidence}"
+    )
