@@ -8,6 +8,7 @@ import pytest
 from adk_agents.coding import (
     CommitAuthority,
     CodingBoundary,
+    PythonCommandProfile,
     ScopeExpansion,
     ScopeGapBlocked,
     StoryWorktree,
@@ -18,8 +19,9 @@ class FakeWorktreeHost:
     def __init__(self) -> None:
         self.created: list[tuple[str, str, str]] = []
 
-    def create_worktree(self, *, base_branch: str, branch: str, path: Path) -> None:
+    def create_worktree(self, *, base_branch: str, branch: str, path: Path) -> str:
         self.created.append((base_branch, branch, str(path)))
+        return "base-sha"
 
 
 class FakeCommitHost:
@@ -40,11 +42,14 @@ class FakeCommitHost:
         self.commits.append(message)
         return "abc123"
 
+    def current_branch(self, worktree: StoryWorktree) -> str:
+        return worktree.branch
+
 
 def boundary() -> CodingBoundary:
     return CodingBoundary(
         approved_paths=("src/adk_agents/", "tests/"),
-        approved_commands=(("pytest",), ("ruff", "check")),
+        command_profile=PythonCommandProfile((("pytest",), ("ruff", "check"))),
     )
 
 
@@ -77,6 +82,14 @@ def test_scope_gap_remains_blocked_until_a_user_approved_expansion_is_recorded()
     subject.require_path("docs/design.md")
 
 
+def test_scope_gap_carries_a_manager_visible_blocked_result():
+    with pytest.raises(ScopeGapBlocked) as error:
+        boundary().require_path("docs/design.md")
+
+    assert error.value.result.status.value == "blocked"
+    assert error.value.result.board_update_request.proposed_status == "Blocked"
+
+
 def test_host_creates_one_fresh_story_worktree_on_the_story_branch(tmp_path):
     host = FakeWorktreeHost()
 
@@ -88,6 +101,7 @@ def test_host_creates_one_fresh_story_worktree_on_the_story_branch(tmp_path):
     )
 
     assert worktree.branch == "agent/16-isolated-coding"
+    assert worktree.base_commit == "base-sha"
     assert host.created == [("main", "agent/16-isolated-coding", str(tmp_path / "story"))]
 
 
@@ -117,6 +131,29 @@ def test_commit_authority_rejects_scope_violation_without_committing(tmp_path):
 
     assert host.ran == []
     assert host.commits == []
+
+
+def test_command_profile_rejects_non_python_or_network_capable_commands():
+    with pytest.raises(ValueError, match="Python command profile"):
+        PythonCommandProfile((("curl", "https://example.test"),))
+
+
+def test_worktree_must_be_fresh(tmp_path):
+    path = tmp_path / "story"
+    path.mkdir()
+
+    with pytest.raises(ValueError, match="fresh"):
+        StoryWorktree.create(host=FakeWorktreeHost(), issue_number=16, slug="isolated-coding", path=path)
+
+
+def test_commit_authority_creates_only_one_verified_commit(tmp_path):
+    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story", base_commit="base")
+    host = FakeCommitHost(("src/adk_agents/coding.py",), {("pytest",): True, ("ruff", "check"): True})
+    authority = CommitAuthority(host, boundary())
+
+    authority.commit(worktree, "feat: enforce coding scope")
+    with pytest.raises(RuntimeError, match="already committed"):
+        authority.commit(worktree, "feat: enforce coding scope")
 
 
 def test_commit_authority_rejects_failed_check_without_committing(tmp_path):
