@@ -48,6 +48,14 @@ def test_reader_pages_until_every_ready_story_is_observed():
     assert graphql.calls == [{"project": "project", "after": None}, {"project": "project", "after": "next"}]
 
 
+def test_project_items_query_requests_page_info_from_the_items_connection():
+    query = " ".join(project_reader_module._PROJECT_ITEMS_QUERY.split())
+
+    assert "fieldValues(first: 30) { nodes" in query
+    assert "} } } } pageInfo { hasNextPage endCursor }" in query
+    assert "nodes { id updatedAt" in query
+
+
 class RecordingGraphQL:
     def __init__(self): self.calls = []
     def execute(self, query, variables):

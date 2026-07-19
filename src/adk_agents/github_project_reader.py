@@ -181,7 +181,40 @@ class GitHubTaskBoardGateway:
         self._writer.set_status(project_item_id, option_id)
 
 
-_PROJECT_ITEMS_QUERY = """query($project: ID!, $after: String) { node(id: $project) { ... on ProjectV2 { items(first: 100, after: $after) { nodes { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } pageInfo { hasNextPage endCursor } } } } } }"""
+_PROJECT_ITEMS_QUERY = """query($project: ID!, $after: String) {
+  node(id: $project) {
+    ... on ProjectV2 {
+      items(first: 100, after: $after) {
+        nodes {
+          id
+          updatedAt
+          content {
+            ... on Issue {
+              id
+              number
+              closed
+              labels(first: 20) { nodes { name } }
+            }
+          }
+          fieldValues(first: 30) {
+            nodes {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                field { ... on ProjectV2SingleSelectField { id name } }
+                optionId
+                name
+              }
+              ... on ProjectV2ItemFieldTextValue {
+                field { ... on ProjectV2Field { id name } }
+                text
+              }
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}"""
 
 _PROJECT_ITEM_QUERY = """query($item: ID!) { node(id: $item) { ... on ProjectV2Item { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } }"""
 
