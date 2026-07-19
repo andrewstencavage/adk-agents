@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import pytest
+
+from adk_agents.contracts import SpecialistResult, SpecialistType, TaskStatus
+from adk_agents.manager import Manager, accepted_result
+from adk_agents.research import ResearchAgent, ResearchRuntimeFailure
+from adk_agents.research_admission import AdmissionState, ResearchModelFingerprint
 from adk_agents.task_board import (
     BoardConfig,
     BoardComment,
     DispatchStore,
     ProjectStory,
+    ResearchBlock,
+    ResearchBlockCause,
+    ResearchBlockCoordinator,
+    ResearchTaskBoardHandoff,
     TaskBoardAdapter,
 )
+from adk_agents.trace import TraceStore
 
 
 CONFIG = BoardConfig(
@@ -178,3 +191,212 @@ def test_a_later_ready_transition_gets_a_new_dispatch(tmp_path):
 
     assert second is not None
     assert second.dispatch_id != first.dispatch_id
+
+
+def test_blocks_in_progress_research_story_for_missing_admission_with_redacted_evidence(tmp_path):
+    gateway = FakeBoardGateway(replace(ready_story(), status_option_id="in-progress"))
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "record.sqlite3"))
+    block = ResearchBlock(
+        cause=ResearchBlockCause.ADMISSION_DENIED,
+        evidence_refs=("sha256:" + "a" * 64,),
+    )
+
+    assert adapter.block_research_story(gateway.story, block)
+
+    assert gateway.story.status_option_id == "blocked"
+    assert gateway.status_writes == ["blocked"]
+    assert "Research admission is missing or inactive." in gateway.comments[0].body
+    assert "sha256:" + "a" * 64 in gateway.comments[0].body
+    assert "secret" not in gateway.comments[0].body
+
+
+def test_blocks_in_progress_research_story_after_runtime_retry_exhaustion(tmp_path):
+    gateway = FakeBoardGateway(replace(ready_story(), status_option_id="in-progress"))
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "record.sqlite3"))
+    block = ResearchBlock(
+        cause=ResearchBlockCause.RUNTIME_RETRY_EXHAUSTED,
+        evidence_refs=("sha256:" + "b" * 64, "sha256:" + "c" * 64),
+    )
+
+    assert adapter.block_research_story(gateway.story, block)
+
+    assert gateway.story.status_option_id == "blocked"
+    assert "Research runtime retry was exhausted." in gateway.comments[0].body
+
+
+def test_blocking_never_reopens_a_user_moved_story(tmp_path):
+    gateway = FakeBoardGateway(ready_story())
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "record.sqlite3"))
+    block = ResearchBlock(ResearchBlockCause.ADMISSION_DENIED, ())
+
+    assert not adapter.block_research_story(gateway.story, block)
+
+    assert gateway.status_writes == []
+
+
+def test_rejects_non_digest_evidence_before_it_can_reach_the_task_board():
+    with pytest.raises(ValueError, match="sha256"):
+        ResearchBlock(ResearchBlockCause.ADMISSION_DENIED, ("sha256:secret-value",))
+
+
+def test_converts_manager_and_runtime_block_results_to_their_distinct_board_causes():
+    denial = SpecialistResult(
+        status=TaskStatus.BLOCKED,
+        summary="Admission missing.",
+        next_manager_action="block_story",
+        evidence_refs=["sha256:" + "a" * 64],
+    )
+    exhaustion = SpecialistResult(
+        status=TaskStatus.BLOCKED,
+        summary="Runtime retry exhausted.",
+        next_manager_action="block_story",
+        evidence_refs=["sha256:" + "b" * 64],
+    )
+
+    assert ResearchBlock.from_admission_denial(denial).cause is ResearchBlockCause.ADMISSION_DENIED
+    assert ResearchBlock.from_runtime_retry_exhaustion(exhaustion).cause is ResearchBlockCause.RUNTIME_RETRY_EXHAUSTED
+
+
+def test_coordinator_surfaces_each_producer_result_as_an_in_progress_board_block(tmp_path):
+    admission_gateway = FakeBoardGateway(replace(ready_story(), status_option_id="in-progress"))
+    runtime_gateway = FakeBoardGateway(replace(ready_story(), status_option_id="in-progress"))
+    denial = SpecialistResult(
+        status=TaskStatus.BLOCKED,
+        summary="Admission missing.",
+        next_manager_action="block_story",
+        evidence_refs=["sha256:" + "a" * 64],
+    )
+    exhaustion = SpecialistResult(
+        status=TaskStatus.BLOCKED,
+        summary="Runtime exhausted.",
+        next_manager_action="block_story",
+        evidence_refs=["sha256:" + "b" * 64],
+    )
+
+    assert ResearchBlockCoordinator(
+        TaskBoardAdapter(CONFIG, admission_gateway, DispatchStore(tmp_path / "admission.sqlite3"))
+    ).surface_manager_admission_denial(admission_gateway.story, denial)
+    assert ResearchBlockCoordinator(
+        TaskBoardAdapter(CONFIG, runtime_gateway, DispatchStore(tmp_path / "runtime.sqlite3"))
+    ).surface_runtime_retry_exhaustion(runtime_gateway.story, exhaustion)
+
+    assert admission_gateway.story.status_option_id == "blocked"
+    assert runtime_gateway.story.status_option_id == "blocked"
+
+
+def test_retry_after_a_failed_block_status_write_does_not_duplicate_the_comment(tmp_path):
+    class FailingOnceGateway(FakeBoardGateway):
+        def __init__(self, story: ProjectStory) -> None:
+            super().__init__(story)
+            self.fail_once = True
+
+        def set_status(self, project_item_id: str, option_id: str) -> None:
+            if option_id == "blocked" and self.fail_once:
+                self.fail_once = False
+                return
+            super().set_status(project_item_id, option_id)
+
+    gateway = FailingOnceGateway(replace(ready_story(), status_option_id="in-progress", dispatch_id="dispatch-0001"))
+    adapter = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "record.sqlite3"))
+    block = ResearchBlock(ResearchBlockCause.ADMISSION_DENIED, ("sha256:" + "a" * 64,))
+
+    assert not adapter.block_research_story(gateway.story, block)
+    assert adapter.block_research_story(gateway.story, block)
+
+    assert len(gateway.comments) == 1
+    assert gateway.story.status_option_id == "blocked"
+
+
+def test_handoff_surfaces_a_real_manager_admission_denial(tmp_path):
+    class NoAdmission:
+        def active_admission_for(self, _):
+            return None
+
+        def candidate_for(self, _):
+            return None
+
+    gateway = FakeBoardGateway(replace(ready_story(), status_option_id="in-progress"))
+    board = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "board.sqlite3"))
+    manager = Manager(
+        TraceStore(tmp_path / "record.sqlite3"),
+        {role.value: accepted_result for role in SpecialistType},
+        NoAdmission(),
+    )
+    raw_task = {
+        "control_issue_ref": "#1",
+        "story_ref": "#32",
+        "dispatch_id": "dispatch-0001",
+        "specialist": "research",
+        "objective": "Find one cited fact.",
+        "acceptance_criteria": ["Return one finding."],
+        "requested_by": "human:andrew",
+        "deadline": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "budget_steps": 2,
+        "research_model_fingerprint": {
+            "runtime": "ollama",
+            "model": "qwen2.5:7b",
+            "model_artifact": "sha256:" + "a" * 64,
+            "runtime_config": {"temperature": "0"},
+        },
+    }
+
+    result = ResearchTaskBoardHandoff(manager, ResearchBlockCoordinator(board)).dispatch(raw_task, gateway.story)
+
+    assert result.status is TaskStatus.BLOCKED
+    assert gateway.story.status_option_id == "blocked"
+
+
+def test_handoff_surfaces_a_real_research_retry_exhaustion(tmp_path):
+    class ActiveAdmission:
+        def __init__(self, fingerprint: ResearchModelFingerprint) -> None:
+            self.candidate = SimpleNamespace(state=AdmissionState.APPROVED, fingerprint=fingerprint)
+
+        def active_admission_for(self, _):
+            return self.candidate
+
+        def candidate_for(self, _):
+            return self.candidate
+
+    class FailingSearch:
+        def search(self, _):
+            raise ResearchRuntimeFailure("unavailable")
+
+    class Evidence:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def write(self, _):
+            self.count += 1
+            return "sha256:" + f"{self.count:064x}"
+
+    fingerprint = ResearchModelFingerprint(
+        runtime="ollama",
+        model="qwen2.5:7b",
+        model_artifact="sha256:" + "a" * 64,
+        runtime_config={"temperature": "0"},
+    )
+    agent = ResearchAgent(FailingSearch(), Evidence())
+    gateway = FakeBoardGateway(replace(ready_story(), status_option_id="in-progress"))
+    board = TaskBoardAdapter(CONFIG, gateway, DispatchStore(tmp_path / "board.sqlite3"))
+    manager = Manager(
+        TraceStore(tmp_path / "record.sqlite3"),
+        {role.value: agent.run if role is SpecialistType.RESEARCH else accepted_result for role in SpecialistType},
+        ActiveAdmission(fingerprint),
+    )
+    raw_task = {
+        "control_issue_ref": "#1",
+        "story_ref": "#32",
+        "dispatch_id": "dispatch-0001",
+        "specialist": "research",
+        "objective": "Find one cited fact.",
+        "acceptance_criteria": ["Return one finding."],
+        "requested_by": "human:andrew",
+        "deadline": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "budget_steps": 2,
+        "research_model_fingerprint": fingerprint.model_dump(mode="json"),
+    }
+
+    result = ResearchTaskBoardHandoff(manager, ResearchBlockCoordinator(board)).dispatch(raw_task, gateway.story)
+
+    assert result.status is TaskStatus.BLOCKED
+    assert gateway.story.status_option_id == "blocked"
