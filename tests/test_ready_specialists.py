@@ -11,42 +11,60 @@ from adk_agents.workflow import ReviewGate, ReviewStatus
 from adk_agents.operations import IncidentTracker, ServicePolicy
 from adk_agents.operations import PersistentIncidentTracker
 from adk_agents.operational_record import OperationalRecord
+from adk_agents.evidence import ArtifactStore, EvidenceLedger
+from adk_agents.specialists import DurableResearchEvidence, ResearchCapabilities
 
 
-def test_research_retries_only_rate_limits_and_returns_cited_uncertain_report():
-    calls = 0
+class FakeDuckDuckGoClient:
+    def __init__(self, responses):
+        self._responses = iter(responses)
 
-    def search(_query: str):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RateLimited("rate limited")
-        return [SearchHit("A claim", "https://example.test/source")]
+    def __enter__(self):
+        return self
 
-    result = ResearchSpecialist.for_testing(search, evidence_writer=lambda _payload: "sha256:test", max_attempts=2).research("bounded question")
+    def __exit__(self, *_args):
+        return False
+
+    def text(self, _query: str, *, max_results: int):
+        response = next(self._responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def research_specialist(tmp_path, monkeypatch, responses, **kwargs):
+    record = OperationalRecord(tmp_path / "research.sqlite3")
+    record.startup()
+    client = FakeDuckDuckGoClient(responses)
+    monkeypatch.setattr(DuckDuckGoSearchAdapter, "_default_client", staticmethod(lambda: client))
+    capabilities = ResearchCapabilities(
+        DuckDuckGoSearchAdapter(),
+        DurableResearchEvidence(ArtifactStore(record, tmp_path / "artifacts"), EvidenceLedger(record)),
+    )
+    return ResearchSpecialist(capabilities, **kwargs)
+
+
+def test_research_retries_only_rate_limits_and_returns_cited_uncertain_report(tmp_path, monkeypatch):
+    result = research_specialist(tmp_path, monkeypatch, [RateLimited("rate limited"), [{"body": "A claim", "href": "https://example.test/source"}]], max_attempts=2).research("bounded question")
 
     assert result.claims[0].source_url == "https://example.test/source"
     assert result.uncertainty == "Sources may be incomplete."
-    assert calls == 2
 
 
-def test_research_emits_a_redacted_evidence_reference_through_its_typed_writer():
-    report = ResearchSpecialist.for_testing(
-        lambda _question: [SearchHit("A claim", "https://example.test/source")],
-        evidence_writer=lambda payload: "sha256:" + str(len(payload)),
-    ).research("bounded question")
+def test_research_emits_a_redacted_evidence_reference_through_its_typed_writer(tmp_path, monkeypatch):
+    report = research_specialist(tmp_path, monkeypatch, [[{"body": "A claim", "href": "https://example.test/source"}]]).research("bounded question")
 
-    assert report.evidence_refs == ["sha256:3"]
+    assert report.evidence_refs[0].startswith("sha256:")
 
 
-def test_research_reports_rate_limit_exhaustion_without_provider_fallback():
-    report = ResearchSpecialist.for_testing(lambda _question: (_ for _ in ()).throw(RateLimited()), evidence_writer=lambda _payload: "sha256:test", max_attempts=1).research("bounded question")
+def test_research_reports_rate_limit_exhaustion_without_provider_fallback(tmp_path, monkeypatch):
+    report = research_specialist(tmp_path, monkeypatch, [RateLimited("rate limited")], max_attempts=1).research("bounded question")
 
     assert report.exhausted is True
     assert report.claims == []
 
 
-def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task():
+def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task(tmp_path, monkeypatch):
     task = SpecialistTask(
         control_issue_ref="#1",
         story_ref="#15",
@@ -59,10 +77,7 @@ def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task(
         budget_steps=1,
     )
 
-    result = ResearchSpecialist.for_testing(
-        lambda _question: [SearchHit("A claim", "https://example.test/source")],
-        evidence_writer=lambda _payload: "sha256:durable-evidence",
-    ).run(task)
+    result = research_specialist(tmp_path, monkeypatch, [[{"body": "A claim", "href": "https://example.test/source"}]]).run(task)
 
     assert result.status is TaskStatus.COMPLETED
     assert result.research_report is not None
@@ -70,21 +85,15 @@ def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task(
     assert result.research_report.uncertainty == "Sources may be incomplete."
 
 
-def test_research_dispatch_blocks_without_durable_evidence_storage():
-    task = SpecialistTask.model_validate({
-        "control_issue_ref": "#1", "story_ref": "#15", "dispatch_id": "research-dispatch-16",
-        "specialist": "research", "objective": "Find evidence.", "acceptance_criteria": ["Cite findings."],
-        "requested_by": "user", "deadline": datetime.now(timezone.utc) + timedelta(minutes=5), "budget_steps": 1,
-    })
-
+def test_research_rejects_non_policy_capabilities():
     with pytest.raises(TypeError, match="ResearchCapabilities"):
-        ResearchSpecialist(lambda _question: [])
+        ResearchSpecialist(object())
 
 
 @pytest.mark.parametrize("max_attempts", [0, -1, 6])
-def test_research_retry_budget_is_validated(max_attempts):
+def test_research_retry_budget_is_validated(max_attempts, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="max_attempts"):
-        ResearchSpecialist.for_testing(lambda _question: [], evidence_writer=lambda _payload: "sha256:test", max_attempts=max_attempts)
+        research_specialist(tmp_path, monkeypatch, [[]], max_attempts=max_attempts)
 
 
 def test_duckduckgo_adapter_exposes_only_cited_search_hits():
@@ -99,7 +108,10 @@ def test_duckduckgo_adapter_exposes_only_cited_search_hits():
             assert max_results == 10
             return [{"body": "A claim", "href": "https://example.test/source"}]
 
-    hits = tuple(DuckDuckGoSearchAdapter(Client)("bounded question"))
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(DuckDuckGoSearchAdapter, "_default_client", staticmethod(Client))
+    hits = tuple(DuckDuckGoSearchAdapter()("bounded question"))
+    monkeypatch.undo()
 
     assert hits == (SearchHit("A claim", "https://example.test/source"),)
 
