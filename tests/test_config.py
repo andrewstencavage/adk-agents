@@ -57,6 +57,18 @@ def test_project_configuration_is_constructed_only_when_all_protocol_ids_are_pre
     assert config.board_config() == BoardConfig("PVT_1", "owner", "repo", "ready", "progress", "blocked")
 
 
+def test_project_configuration_defers_status_option_ids_to_live_schema_resolution(monkeypatch, tmp_path):
+    for name, value in {
+        "ADK_AGENTS_DATA_DIR": str(tmp_path),
+        "ADK_AGENTS_GITHUB_PROJECT_ID": "PVT_1",
+        "ADK_AGENTS_GITHUB_OWNER": "owner",
+        "ADK_AGENTS_GITHUB_REPOSITORY": "repo",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    assert ServiceConfig.from_environment().board_config() is None
+
+
 def test_project_writer_requires_pinned_status_and_dispatch_field_ids(monkeypatch, tmp_path):
     monkeypatch.setenv("ADK_AGENTS_DATA_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("ADK_AGENTS_GITHUB_PROJECT_ID", "PVT_1")

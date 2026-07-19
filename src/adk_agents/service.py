@@ -13,7 +13,7 @@ from .routing import ModelRouter
 from .trace import TraceStore
 from .service_loop import LeasedPollingWorker, PollingService, task_from_issue_body
 from .task_board import DispatchStore, TaskBoardAdapter
-from .github_project_reader import GitHubGraphQLTransport, GitHubIssueBodyReader, GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway
+from .github_project_reader import GitHubGraphQLTransport, GitHubIssueBodyReader, GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway, resolve_status_option_ids
 from .integration import ApprovedStoryWorkflow
 from .evidence import EvidenceLedger
 from .ids import uuid7
@@ -57,10 +57,9 @@ def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) 
     handoff, and moves that matching story to Blocked rather than executing a
     specialist handler.
     """
-    board_config = config.board_config()
     writer_fields = config.project_writer_fields()
     reader_fields = config.project_reader_fields()
-    if board_config is None or writer_fields is None or reader_fields is None:
+    if writer_fields is None or reader_fields is None:
         raise ValueError("live polling requires complete GitHub Project configuration")
     project_token = os.environ.get(config.github_project_token_env)
     issues_token = os.environ.get(config.github_issues_token_env)
@@ -69,6 +68,21 @@ def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) 
     status_field_id, dispatch_field_id, agent_summary_field_id = writer_fields
     _reader_status_field_id, primary_specialist_field_id = reader_fields
     project_graphql = GitHubGraphQLTransport(project_token)
+    board_config = config.board_config()
+    if board_config is None:
+        if not all((config.github_project_id, config.github_owner, config.github_repository)):
+            raise ValueError("live polling requires complete GitHub Project configuration")
+        ready_option_id, in_progress_option_id, blocked_option_id = resolve_status_option_ids(
+            project_graphql, config.github_project_id, status_field_id
+        )
+        board_config = BoardConfig(
+            config.github_project_id,
+            config.github_owner,
+            config.github_repository,
+            ready_option_id,
+            in_progress_option_id,
+            blocked_option_id,
+        )
     reader = GitHubProjectReader(board_config, project_graphql, status_field_id=status_field_id, primary_specialist_field_id=primary_specialist_field_id, dispatch_field_id=dispatch_field_id)
     writer = GitHubProjectFieldWriter(
         project_graphql, project_id=board_config.project_id, status_field_id=status_field_id,

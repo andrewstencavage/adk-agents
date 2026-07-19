@@ -29,6 +29,30 @@ class GitHubGraphQLTransport:
         return payload
 
 
+def resolve_status_option_ids(
+    graphql: GraphQLTransport, project_id: str, status_field_id: str
+) -> tuple[str, str, str]:
+    """Resolve the three agent-writable lifecycle options from a pinned field."""
+    cursor: str | None = None
+    while True:
+        response = graphql.execute(_PROJECT_STATUS_OPTIONS_QUERY, {"project": project_id, "after": cursor})
+        try:
+            fields = response["data"]["node"]["fields"]
+        except (KeyError, TypeError) as error:
+            raise ValueError("GitHub Project field schema was unavailable") from error
+        status_field = next((field for field in fields["nodes"] if field.get("id") == status_field_id), None)
+        if status_field is not None:
+            options = {option["name"]: option["id"] for option in status_field.get("options", [])}
+            try:
+                return options["Ready"], options["In Progress"], options["Blocked"]
+            except KeyError as error:
+                raise ValueError("configured GitHub Status field is missing a required lifecycle option") from error
+        page = fields.get("pageInfo", {"hasNextPage": False})
+        if not page["hasNextPage"]:
+            raise ValueError("configured GitHub Status field was not found")
+        cursor = page["endCursor"]
+
+
 class GitHubProjectFieldWriter:
     """Typed, narrow Project V2 field writer used only by the board adapter.
 
@@ -217,6 +241,8 @@ _PROJECT_ITEMS_QUERY = """query($project: ID!, $after: String) {
 }"""
 
 _PROJECT_ITEM_QUERY = """query($item: ID!) { node(id: $item) { ... on ProjectV2Item { id updatedAt content { ... on Issue { id number closed labels(first: 20) { nodes { name } } } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id name } } optionId name } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { id name } } text } } } } } }"""
+
+_PROJECT_STATUS_OPTIONS_QUERY = """query($project: ID!, $after: String) { node(id: $project) { ... on ProjectV2 { fields(first: 100, after: $after) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } pageInfo { hasNextPage endCursor } } } } }"""
 
 _UPDATE_PROJECT_FIELD_MUTATION = """mutation($project: ID!, $item: ID!, $field: ID!, $value: ProjectV2FieldValue!) { updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: $value}) { projectV2Item { id } } }"""
 

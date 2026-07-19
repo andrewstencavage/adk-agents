@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from adk_agents.github_project_reader import GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway
+from adk_agents.github_project_reader import GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway, resolve_status_option_ids
 import adk_agents.github_project_reader as project_reader_module
 from adk_agents.task_board import BoardComment, BoardConfig, ProjectStory
 
@@ -46,6 +46,22 @@ def test_reader_pages_until_every_ready_story_is_observed():
 
     assert [story.issue_number for story in stories] == [1, 2]
     assert graphql.calls == [{"project": "project", "after": None}, {"project": "project", "after": "next"}]
+
+
+def test_resolves_only_required_lifecycle_options_from_the_pinned_status_field():
+    class SchemaGraphQL:
+        def execute(self, _query, variables):
+            assert variables == {"project": "project", "after": None}
+            return {"data": {"node": {"fields": {"nodes": [
+                {"id": "other", "name": "Other", "options": [{"id": "ignored", "name": "Ready"}]},
+                {"id": "status", "name": "Status", "options": [
+                    {"id": "ready", "name": "Ready"},
+                    {"id": "progress", "name": "In Progress"},
+                    {"id": "blocked", "name": "Blocked"},
+                ]},
+            ]}}}}
+
+    assert resolve_status_option_ids(SchemaGraphQL(), "project", "status") == ("ready", "progress", "blocked")
 
 
 def test_project_items_query_requests_page_info_from_the_items_connection():

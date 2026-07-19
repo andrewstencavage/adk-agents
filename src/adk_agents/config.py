@@ -57,6 +57,8 @@ class ServiceConfig:
     def board_config(self) -> BoardConfig | None:
         if self.github_project_id is None:
             return None
+        if self.ready_option_id is None and self.in_progress_option_id is None and self.blocked_option_id is None:
+            return None
         if not all((self.github_owner, self.github_repository, self.ready_option_id, self.in_progress_option_id, self.blocked_option_id)):
             raise ValueError("GitHub Project status option IDs are required for dispatch")
         return BoardConfig(self.github_project_id, self.github_owner, self.github_repository, self.ready_option_id, self.in_progress_option_id, self.blocked_option_id)
