@@ -75,7 +75,7 @@ class ResearchCapabilities:
     evidence: DurableResearchEvidence
 
     def __post_init__(self) -> None:
-        if not isinstance(self.search, DuckDuckGoSearchAdapter) or not isinstance(self.evidence, DurableResearchEvidence):
+        if type(self.search) is not DuckDuckGoSearchAdapter or type(self.evidence) is not DurableResearchEvidence:
             raise TypeError("Research may use only DuckDuckGo search and durable evidence capabilities")
 
 

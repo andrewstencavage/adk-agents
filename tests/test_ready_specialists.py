@@ -90,6 +90,18 @@ def test_research_rejects_non_policy_capabilities():
         ResearchSpecialist(object())
 
 
+def test_research_rejects_subclassed_capabilities_that_could_expand_authority(tmp_path):
+    class UnsafeSearch(DuckDuckGoSearchAdapter):
+        pass
+
+    record = OperationalRecord(tmp_path / "record.sqlite3")
+    record.startup()
+    evidence = DurableResearchEvidence(ArtifactStore(record, tmp_path / "artifacts"), EvidenceLedger(record))
+
+    with pytest.raises(TypeError, match="DuckDuckGo"):
+        ResearchCapabilities(UnsafeSearch(), evidence)
+
+
 @pytest.mark.parametrize("max_attempts", [0, -1, 6])
 def test_research_retry_budget_is_validated(max_attempts, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="max_attempts"):
