@@ -8,6 +8,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .research_admission import ResearchModelFingerprint
+
 
 class SpecialistType(str, Enum):
     SCRUM_MASTER = "scrum_master"
@@ -47,6 +49,7 @@ class SpecialistTask(BaseModel):
     deadline: datetime
     budget_steps: Annotated[int, Field(ge=1, le=20)]
     coding_agent_scope: CodingAgentScope | None = None
+    research_model_fingerprint: ResearchModelFingerprint | None = None
 
     @field_validator("acceptance_criteria")
     @classmethod
@@ -68,6 +71,10 @@ class SpecialistTask(BaseModel):
             raise ValueError("coding tasks require coding_agent_scope")
         if self.specialist is not SpecialistType.CODING and self.coding_agent_scope is not None:
             raise ValueError("only coding tasks may include coding_agent_scope")
+        if self.specialist is SpecialistType.RESEARCH and self.research_model_fingerprint is None:
+            raise ValueError("research tasks require research_model_fingerprint")
+        if self.specialist is not SpecialistType.RESEARCH and self.research_model_fingerprint is not None:
+            raise ValueError("only research tasks may include research_model_fingerprint")
         if self.deadline.tzinfo is None or self.deadline <= datetime.now(timezone.utc):
             raise ValueError("deadline must be a future timezone-aware timestamp")
         return self

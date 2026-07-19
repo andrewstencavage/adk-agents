@@ -181,6 +181,17 @@ class ResearchAdmissionService:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def candidate_for(self, fingerprint: ResearchModelFingerprint) -> ResearchAdmissionCandidate | None:
+        """Return the latest exact candidate for safe Manager denial evidence."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM research_admission_candidate
+                   WHERE runtime = ? AND model = ? AND model_artifact = ? AND runtime_config = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                self._fingerprint_values(fingerprint),
+            ).fetchone()
+        return self._from_row(row) if row is not None else None
+
     def _transition(
         self,
         candidate: ResearchAdmissionCandidate,

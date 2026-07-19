@@ -14,7 +14,7 @@ def valid_task() -> dict[str, object]:
         "control_issue_ref": "#1",
         "story_ref": "#11",
         "dispatch_id": "dispatch-0001",
-        "specialist": SpecialistType.RESEARCH.value,
+        "specialist": SpecialistType.SCRUM_MASTER.value,
         "objective": "Summarize one bounded public source.",
         "acceptance_criteria": ["Return one cited finding."],
         "requested_by": "human:andrew",
