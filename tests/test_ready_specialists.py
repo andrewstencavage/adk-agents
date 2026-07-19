@@ -23,7 +23,7 @@ def test_research_retries_only_rate_limits_and_returns_cited_uncertain_report():
             raise RateLimited("rate limited")
         return [SearchHit("A claim", "https://example.test/source")]
 
-    result = ResearchSpecialist(search, max_attempts=2).research("bounded question")
+    result = ResearchSpecialist.for_testing(search, evidence_writer=lambda _payload: "sha256:test", max_attempts=2).research("bounded question")
 
     assert result.claims[0].source_url == "https://example.test/source"
     assert result.uncertainty == "Sources may be incomplete."
@@ -31,7 +31,7 @@ def test_research_retries_only_rate_limits_and_returns_cited_uncertain_report():
 
 
 def test_research_emits_a_redacted_evidence_reference_through_its_typed_writer():
-    report = ResearchSpecialist(
+    report = ResearchSpecialist.for_testing(
         lambda _question: [SearchHit("A claim", "https://example.test/source")],
         evidence_writer=lambda payload: "sha256:" + str(len(payload)),
     ).research("bounded question")
@@ -40,7 +40,7 @@ def test_research_emits_a_redacted_evidence_reference_through_its_typed_writer()
 
 
 def test_research_reports_rate_limit_exhaustion_without_provider_fallback():
-    report = ResearchSpecialist(lambda _question: (_ for _ in ()).throw(RateLimited()), max_attempts=1).research("bounded question")
+    report = ResearchSpecialist.for_testing(lambda _question: (_ for _ in ()).throw(RateLimited()), evidence_writer=lambda _payload: "sha256:test", max_attempts=1).research("bounded question")
 
     assert report.exhausted is True
     assert report.claims == []
@@ -59,7 +59,7 @@ def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task(
         budget_steps=1,
     )
 
-    result = ResearchSpecialist(
+    result = ResearchSpecialist.for_testing(
         lambda _question: [SearchHit("A claim", "https://example.test/source")],
         evidence_writer=lambda _payload: "sha256:durable-evidence",
     ).run(task)
@@ -77,13 +77,14 @@ def test_research_dispatch_blocks_without_durable_evidence_storage():
         "requested_by": "user", "deadline": datetime.now(timezone.utc) + timedelta(minutes=5), "budget_steps": 1,
     })
 
-    assert ResearchSpecialist(lambda _question: []).run(task).status is TaskStatus.BLOCKED
+    with pytest.raises(TypeError, match="ResearchCapabilities"):
+        ResearchSpecialist(lambda _question: [])
 
 
 @pytest.mark.parametrize("max_attempts", [0, -1, 6])
 def test_research_retry_budget_is_validated(max_attempts):
     with pytest.raises(ValueError, match="max_attempts"):
-        ResearchSpecialist(lambda _question: [], max_attempts=max_attempts)
+        ResearchSpecialist.for_testing(lambda _question: [], evidence_writer=lambda _payload: "sha256:test", max_attempts=max_attempts)
 
 
 def test_duckduckgo_adapter_exposes_only_cited_search_hits():

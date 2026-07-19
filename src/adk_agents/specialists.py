@@ -49,15 +49,40 @@ class DuckDuckGoSearchAdapter:
         return DDGS()
 
 
-class ResearchSpecialist:
-    """Uses only the injected typed search adapter; no browser or shell capability."""
+@dataclass(frozen=True)
+class ResearchCapabilities:
+    """The sole production capability grant for Research work."""
 
-    def __init__(self, search: Callable[[str], Iterable[SearchHit]], *, max_attempts: int = 2, retry_delay_seconds: float = 0, wait: Callable[[float], None] = sleep, evidence_writer: Callable[[object], str] | None = None) -> None:
+    search: DuckDuckGoSearchAdapter
+    evidence_writer: Callable[[object], str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.search, DuckDuckGoSearchAdapter):
+            raise TypeError("Research may use only the DuckDuckGo search adapter")
+
+
+class ResearchSpecialist:
+    """Uses the policy-owned Research capability grant; no general tools are accepted."""
+
+    def __init__(self, capabilities: ResearchCapabilities, *, max_attempts: int = 2, retry_delay_seconds: float = 0) -> None:
+        if not isinstance(capabilities, ResearchCapabilities):
+            raise TypeError("ResearchSpecialist requires ResearchCapabilities")
         if not 1 <= max_attempts <= 5:
             raise ValueError("max_attempts must be between 1 and 5")
         if retry_delay_seconds < 0:
             raise ValueError("retry_delay_seconds must not be negative")
-        self._search, self._max_attempts, self._retry_delay_seconds, self._wait, self._evidence_writer = search, max_attempts, retry_delay_seconds, wait, evidence_writer
+        self._search, self._max_attempts, self._retry_delay_seconds = capabilities.search, max_attempts, retry_delay_seconds
+        self._evidence_writer = capabilities.evidence_writer
+
+    @classmethod
+    def for_testing(cls, search: Callable[[str], Iterable[SearchHit]], *, evidence_writer: Callable[[object], str], max_attempts: int = 2, retry_delay_seconds: float = 0) -> "ResearchSpecialist":
+        """Test-only seam; production code must construct ResearchCapabilities."""
+        instance = object.__new__(cls)
+        if not 1 <= max_attempts <= 5 or retry_delay_seconds < 0:
+            return cls(ResearchCapabilities(DuckDuckGoSearchAdapter(), evidence_writer), max_attempts=max_attempts, retry_delay_seconds=retry_delay_seconds)
+        instance._search, instance._max_attempts, instance._retry_delay_seconds = search, max_attempts, retry_delay_seconds
+        instance._evidence_writer = evidence_writer
+        return instance
 
     def research(self, question: str) -> ResearchReport:
         for attempt in range(self._max_attempts):
@@ -74,19 +99,13 @@ class ResearchSpecialist:
                         evidence_refs=[] if self._evidence_writer is None else [self._evidence_writer({"question": question, "exhausted": True})],
                         exhausted=True,
                     )
-                self._wait(self._retry_delay_seconds)
+                sleep(self._retry_delay_seconds)
         raise AssertionError("unreachable")
 
     def run(self, task: SpecialistTask) -> SpecialistResult:
         """Handle one bounded Research dispatch through the Manager contract."""
         if task.specialist is not SpecialistType.RESEARCH:
             raise ValueError("Research specialist accepts only Research tasks")
-        if self._evidence_writer is None:
-            return SpecialistResult(
-                status=TaskStatus.BLOCKED,
-                summary="Research is blocked because durable evidence storage is unavailable.",
-                next_manager_action="configure_research_evidence_store",
-            )
         report = self.research(task.objective)
         evidence_refs = report.evidence_refs
         if report.exhausted:
