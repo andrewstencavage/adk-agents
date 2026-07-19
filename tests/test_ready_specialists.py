@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 from adk_agents.contracts import SpecialistTask, TaskStatus
 from adk_agents.contracts import SpecialistType
+import pytest
+
 from adk_agents.specialists import CodingBoundary, DuckDuckGoSearchAdapter, RateLimited, ResearchSpecialist, SearchHit
 from adk_agents.workflow import ReviewGate, ReviewStatus
 from adk_agents.operations import IncidentTracker, ServicePolicy
@@ -58,13 +60,30 @@ def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task(
     )
 
     result = ResearchSpecialist(
-        lambda _question: [SearchHit("A claim", "https://example.test/source")]
+        lambda _question: [SearchHit("A claim", "https://example.test/source")],
+        evidence_writer=lambda _payload: "sha256:durable-evidence",
     ).run(task)
 
     assert result.status is TaskStatus.COMPLETED
     assert result.research_report is not None
     assert result.research_report.claims[0].source_url == "https://example.test/source"
     assert result.research_report.uncertainty == "Sources may be incomplete."
+
+
+def test_research_dispatch_blocks_without_durable_evidence_storage():
+    task = SpecialistTask.model_validate({
+        "control_issue_ref": "#1", "story_ref": "#15", "dispatch_id": "research-dispatch-16",
+        "specialist": "research", "objective": "Find evidence.", "acceptance_criteria": ["Cite findings."],
+        "requested_by": "user", "deadline": datetime.now(timezone.utc) + timedelta(minutes=5), "budget_steps": 1,
+    })
+
+    assert ResearchSpecialist(lambda _question: []).run(task).status is TaskStatus.BLOCKED
+
+
+@pytest.mark.parametrize("max_attempts", [0, -1, 6])
+def test_research_retry_budget_is_validated(max_attempts):
+    with pytest.raises(ValueError, match="max_attempts"):
+        ResearchSpecialist(lambda _question: [], max_attempts=max_attempts)
 
 
 def test_duckduckgo_adapter_exposes_only_cited_search_hits():

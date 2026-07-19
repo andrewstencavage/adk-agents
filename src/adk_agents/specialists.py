@@ -53,6 +53,10 @@ class ResearchSpecialist:
     """Uses only the injected typed search adapter; no browser or shell capability."""
 
     def __init__(self, search: Callable[[str], Iterable[SearchHit]], *, max_attempts: int = 2, retry_delay_seconds: float = 0, wait: Callable[[float], None] = sleep, evidence_writer: Callable[[object], str] | None = None) -> None:
+        if not 1 <= max_attempts <= 5:
+            raise ValueError("max_attempts must be between 1 and 5")
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must not be negative")
         self._search, self._max_attempts, self._retry_delay_seconds, self._wait, self._evidence_writer = search, max_attempts, retry_delay_seconds, wait, evidence_writer
 
     def research(self, question: str) -> ResearchReport:
@@ -77,6 +81,12 @@ class ResearchSpecialist:
         """Handle one bounded Research dispatch through the Manager contract."""
         if task.specialist is not SpecialistType.RESEARCH:
             raise ValueError("Research specialist accepts only Research tasks")
+        if self._evidence_writer is None:
+            return SpecialistResult(
+                status=TaskStatus.BLOCKED,
+                summary="Research is blocked because durable evidence storage is unavailable.",
+                next_manager_action="configure_research_evidence_store",
+            )
         report = self.research(task.objective)
         evidence_refs = report.evidence_refs
         if report.exhausted:
