@@ -33,6 +33,14 @@ class CommandResult:
 
 
 @dataclass(frozen=True)
+class CriterionResult:
+    criterion: str
+    passed: bool
+    path: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class ReadOnlyCheckout:
     path: str
     source_worktree: str
@@ -55,6 +63,7 @@ class ReviewRequest:
     commit_sha: str
     source_worktree: str
     acceptance_criteria: list[str]
+    criterion_results: list[CriterionResult]
     approved_commands: list[str]
     changed_paths: list[str]
     approved_paths: list[str]
@@ -62,6 +71,7 @@ class ReviewRequest:
     implementation_summary: str
     handoff_evidence: list[str]
     findings: list[Finding] | None = None
+    scope_expansion_approved_paths: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -106,12 +116,16 @@ class ReviewGate:
 
     def review(self, request: ReviewRequest) -> ReviewOutcome:
         """Run the versioned gate and publish only an accepted story's normal PR."""
+        if request.correction_cycle < 0 or request.correction_cycle > 2:
+            return self._blocked(request, "Review cannot exceed two correction cycles.")
         checkout = self._checkouts.create_read_only(request.branch, request.commit_sha)
         if not checkout.read_only or checkout.path == request.source_worktree or checkout.source_worktree != request.source_worktree:
             return self._blocked(request, "Review checkout is not independent and read-only.")
 
-        findings = self._scope_findings(request)
-        command_outcome = self._run_commands(checkout, request.approved_commands, request.correction_cycle)
+        findings = self._scope_findings(request) + self._criterion_findings(request)
+        command_outcome, command_results = self._run_commands(
+            checkout, request.approved_commands, request.correction_cycle
+        )
         if command_outcome is not None:
             return command_outcome if command_outcome.state is ReviewState.BLOCKED else self._reject(request, command_outcome.findings)
         findings.extend(request.findings or [])
@@ -123,7 +137,7 @@ class ReviewGate:
             head_branch=request.branch,
             base_branch="main",
             review_gate_version=self.VERSION,
-            body=self._pr_body(request),
+            body=self._pr_body(request, command_results),
         )
         return ReviewOutcome(
             state=ReviewState.ACCEPTED,
@@ -134,13 +148,16 @@ class ReviewGate:
 
     def _run_commands(
         self, checkout: ReadOnlyCheckout, commands: list[str], correction_cycle: int
-    ) -> ReviewOutcome | None:
+    ) -> tuple[ReviewOutcome | None, list[CommandResult]]:
+        results = []
         for command in commands:
             result = self._checks.run(checkout, command)
+            results.append(result)
             if result.passed:
                 continue
             if result.transient:
                 retry = self._checks.run(checkout, command)
+                results.append(retry)
                 if retry.passed:
                     continue
                 if retry.transient:
@@ -149,7 +166,7 @@ class ReviewGate:
                         correction_cycle=correction_cycle,
                         findings=[],
                         blocked_reason=f"Repeated transient failure for `{command}`: {retry.detail}",
-                    )
+                    ), results
                 result = retry
             return ReviewOutcome(
                 state=ReviewState.NEEDS_CORRECTION,
@@ -162,14 +179,15 @@ class ReviewGate:
                         remediation="Fix the reported failures, then submit a new verified commit.",
                     )
                 ],
-            )
-        return None
+            ), results
+        return None, results
 
     def _scope_findings(self, request: ReviewRequest) -> list[Finding]:
         findings = []
         for path in request.changed_paths:
-            allowed = any(path.startswith(prefix) for prefix in request.approved_paths)
-            restricted = path in self._RESTRICTED_FILES or path.startswith(self._RESTRICTED_PREFIXES)
+            expanded = any(path.startswith(prefix) for prefix in request.scope_expansion_approved_paths or [])
+            allowed = any(path.startswith(prefix) for prefix in request.approved_paths) or expanded
+            restricted = (path in self._RESTRICTED_FILES or path.startswith(self._RESTRICTED_PREFIXES)) and not expanded
             if not allowed or restricted:
                 findings.append(
                     Finding(
@@ -177,6 +195,22 @@ class ReviewGate:
                         path=path,
                         violated_requirement="Changes must stay within approved scope and exclude dependency or CI/workflow files.",
                         remediation="Remove the unapproved change or obtain recorded scope approval.",
+                    )
+                )
+        return findings
+
+    def _criterion_findings(self, request: ReviewRequest) -> list[Finding]:
+        results = {result.criterion: result for result in request.criterion_results}
+        findings = []
+        for criterion in request.acceptance_criteria:
+            result = results.get(criterion)
+            if result is None or not result.passed:
+                findings.append(
+                    Finding(
+                        severity="blocking",
+                        path=result.path if result is not None else "<review checkout>",
+                        violated_requirement=criterion,
+                        remediation="Provide a committed implementation that satisfies this criterion.",
                     )
                 )
         return findings
@@ -189,7 +223,7 @@ class ReviewGate:
     def _blocked(self, request: ReviewRequest, reason: str) -> ReviewOutcome:
         return ReviewOutcome(ReviewState.BLOCKED, request.correction_cycle, [], blocked_reason=reason)
 
-    def _pr_body(self, request: ReviewRequest) -> str:
+    def _pr_body(self, request: ReviewRequest, command_results: list[CommandResult]) -> str:
         return "\n".join(
             [
                 f"Story: {request.story_ref}",
@@ -199,7 +233,11 @@ class ReviewGate:
                 f"Commit: `{request.commit_sha}`",
                 f"Review gate: {self.VERSION}",
                 f"Revision count: {request.correction_cycle}",
-                "Approved checks: " + ", ".join(request.approved_commands),
+                "Changed files: " + ", ".join(request.changed_paths),
+                *[
+                    f"Check result: `{result.command}` — {'passed' if result.passed else 'failed'}"
+                    for result in command_results
+                ],
                 "Handoff evidence: " + ", ".join(request.handoff_evidence),
             ]
         )

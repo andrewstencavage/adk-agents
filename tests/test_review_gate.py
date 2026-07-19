@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from adk_agents.review_gate import (
     CommandResult,
+    CriterionResult,
     Finding,
     ReviewGate,
     ReviewRequest,
@@ -54,6 +55,13 @@ def request(**overrides) -> ReviewRequest:
         "commit_sha": "a" * 40,
         "source_worktree": "/worktrees/17",
         "acceptance_criteria": ["Review uses a read-only checkout."],
+        "criterion_results": [
+            CriterionResult(
+                criterion="Review uses a read-only checkout.",
+                passed=True,
+                path="src/adk_agents/review_gate.py",
+            )
+        ],
         "approved_commands": ["pytest -q"],
         "changed_paths": ["src/adk_agents/review_gate.py"],
         "approved_paths": ["src/", "tests/"],
@@ -157,3 +165,60 @@ def test_unapproved_ci_change_is_a_blocking_finding_with_path_evidence():
     assert outcome.state is ReviewState.NEEDS_CORRECTION
     assert outcome.findings[0].path == ".github/workflows/test.yml"
     assert outcome.findings[0].remediation == "Remove the unapproved change or obtain recorded scope approval."
+
+
+def test_unmet_acceptance_criterion_blocks_pr_with_evidence_and_remediation():
+    prs = FakePullRequests()
+    gate = ReviewGate(FakeCheckoutProvider(), FakeChecks([passing_result()]), prs)
+
+    outcome = gate.review(
+        request(
+            criterion_results=[
+                CriterionResult(
+                    criterion="Review uses a read-only checkout.",
+                    passed=False,
+                    path="src/adk_agents/review_gate.py",
+                    detail="checkout mutability was not proven",
+                )
+            ]
+        )
+    )
+
+    assert outcome.state is ReviewState.NEEDS_CORRECTION
+    assert outcome.findings[0].violated_requirement == "Review uses a read-only checkout."
+    assert outcome.findings[0].remediation == "Provide a committed implementation that satisfies this criterion."
+    assert prs.requests == []
+
+
+def test_approved_ci_scope_expansion_is_not_rejected():
+    gate = ReviewGate(FakeCheckoutProvider(), FakeChecks([passing_result()]), FakePullRequests())
+
+    outcome = gate.review(
+        request(
+            changed_paths=[".github/workflows/test.yml"],
+            scope_expansion_approved_paths=[".github/"],
+        )
+    )
+
+    assert outcome.state is ReviewState.ACCEPTED
+
+
+def test_an_invalid_third_correction_cycle_is_blocked_before_pr_creation():
+    prs = FakePullRequests()
+    gate = ReviewGate(FakeCheckoutProvider(), FakeChecks([passing_result()]), prs)
+
+    outcome = gate.review(request(correction_cycle=3))
+
+    assert outcome.state is ReviewState.BLOCKED
+    assert "two correction cycles" in outcome.blocked_reason
+    assert prs.requests == []
+
+
+def test_pr_handoff_includes_actual_passing_check_result_and_changed_file_summary():
+    prs = FakePullRequests()
+    gate = ReviewGate(FakeCheckoutProvider(), FakeChecks([passing_result()]), prs)
+
+    gate.review(request())
+
+    assert "Check result: `pytest -q` — passed" in prs.requests[0].body
+    assert "Changed files: src/adk_agents/review_gate.py" in prs.requests[0].body
