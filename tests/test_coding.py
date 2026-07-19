@@ -45,6 +45,9 @@ class FakeCommitHost:
     def current_branch(self, worktree: StoryWorktree) -> str:
         return worktree.branch
 
+    def verifies_worktree(self, worktree: StoryWorktree) -> bool:
+        return worktree.base_commit is not None
+
 
 def boundary() -> CodingBoundary:
     return CodingBoundary(
@@ -75,6 +78,7 @@ def test_scope_gap_remains_blocked_until_a_user_approved_expansion_is_recorded()
         ScopeExpansion(
             approved_by="human:andrew",
             approval_ref="#16-comment-1",
+            recorded_by="scrum_master",
             paths=("docs/",),
         )
     )
@@ -106,7 +110,7 @@ def test_host_creates_one_fresh_story_worktree_on_the_story_branch(tmp_path):
 
 
 def test_commit_authority_checks_allowed_diff_and_required_profile_before_one_commit(tmp_path):
-    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story")
+    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story", base_commit="base")
     host = FakeCommitHost(
         changed_paths=("src/adk_agents/coding.py", "tests/test_coding.py"),
         check_results={("pytest",): True, ("ruff", "check"): True},
@@ -120,7 +124,7 @@ def test_commit_authority_checks_allowed_diff_and_required_profile_before_one_co
 
 
 def test_commit_authority_rejects_scope_violation_without_committing(tmp_path):
-    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story")
+    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story", base_commit="base")
     host = FakeCommitHost(
         changed_paths=("pyproject.toml",),
         check_results={("pytest",): True, ("ruff", "check"): True},
@@ -136,6 +140,34 @@ def test_commit_authority_rejects_scope_violation_without_committing(tmp_path):
 def test_command_profile_rejects_non_python_or_network_capable_commands():
     with pytest.raises(ValueError, match="Python command profile"):
         PythonCommandProfile((("curl", "https://example.test"),))
+    with pytest.raises(ValueError, match="Python command profile"):
+        PythonCommandProfile((("mypy", "--install-types"),))
+
+
+def test_scope_expansion_requires_a_scrum_master_record():
+    with pytest.raises(ValueError, match="Scrum Master"):
+        ScopeExpansion(approved_by="human:andrew", approval_ref="#16", paths=("docs/",))
+
+
+def test_commit_authority_keeps_required_checks_separate_from_expanded_commands(tmp_path):
+    subject = boundary()
+    subject.record_expansion(ScopeExpansion(approved_by="human:andrew", approval_ref="#16", recorded_by="scrum_master", commands=(("mypy",),)))
+    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story", base_commit="base")
+    host = FakeCommitHost(("src/adk_agents/coding.py",), {("pytest",): True, ("ruff", "check"): True, ("mypy",): True})
+
+    CommitAuthority(host, subject).commit(worktree, "feat: enforce coding scope")
+
+    assert host.ran == [("pytest",), ("ruff", "check")]
+
+
+def test_commit_authority_rejects_an_unverified_worktree(tmp_path):
+    class UnverifiedHost(FakeCommitHost):
+        def verifies_worktree(self, worktree: StoryWorktree) -> bool:
+            return False
+
+    host = UnverifiedHost(("src/adk_agents/coding.py",), {("pytest",): True, ("ruff", "check"): True})
+    with pytest.raises(RuntimeError, match="host-created"):
+        CommitAuthority(host, boundary()).commit(StoryWorktree("agent/16-code", tmp_path / "story", "base"), "message")
 
 
 def test_worktree_must_be_fresh(tmp_path):
@@ -157,7 +189,7 @@ def test_commit_authority_creates_only_one_verified_commit(tmp_path):
 
 
 def test_commit_authority_rejects_failed_check_without_committing(tmp_path):
-    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story")
+    worktree = StoryWorktree(branch="agent/16-isolated-coding", path=tmp_path / "story", base_commit="base")
     host = FakeCommitHost(
         changed_paths=("src/adk_agents/coding.py",),
         check_results={("pytest",): False, ("ruff", "check"): True},

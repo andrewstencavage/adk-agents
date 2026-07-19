@@ -33,7 +33,7 @@ class PythonCommandProfile:
 
     def __post_init__(self) -> None:
         executables = {"pytest", "ruff", "mypy", "pyright"}
-        blocked_words = {"add", "install", "pip", "sync", "curl", "wget"}
+        blocked_words = {"add", "install", "pip", "sync", "curl", "wget", "--install-types"}
         if not self.commands or any(not command for command in self.commands):
             raise ValueError("Python command profile requires one or more commands")
         if any(not self._is_python_check(command, executables, blocked_words) for command in self.commands):
@@ -55,12 +55,15 @@ class ScopeExpansion:
 
     approved_by: str
     approval_ref: str
+    recorded_by: str = ""
     paths: tuple[str, ...] = ()
     commands: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.approved_by.startswith("human:") or not self.approval_ref:
             raise ValueError("scope expansions require a recorded user approval")
+        if self.recorded_by != "scrum_master":
+            raise ValueError("scope expansions require a Scrum Master record")
         if not self.paths and not self.commands:
             raise ValueError("scope expansions must add a path or command")
 
@@ -95,6 +98,10 @@ class CodingBoundary:
         return self.command_profile.commands + tuple(
             command for item in self._expansions for command in item.commands
         )
+
+    def required_checks(self) -> tuple[tuple[str, ...], ...]:
+        """The immutable manifest checks the host must run before a commit."""
+        return self.command_profile.commands
 
 
 class WorktreeHost(Protocol):
@@ -133,6 +140,8 @@ class CommitHost(Protocol):
 
     def current_branch(self, worktree: StoryWorktree) -> str: ...
 
+    def verifies_worktree(self, worktree: StoryWorktree) -> bool: ...
+
 
 class CommitAuthority:
     """Creates a story commit only after independently verifying its diff and checks."""
@@ -146,11 +155,13 @@ class CommitAuthority:
         identity = (str(worktree.path), worktree.branch)
         if identity in self._committed_worktrees:
             raise RuntimeError("story worktree already committed")
-        if not worktree.branch.startswith("agent/") or self._host.current_branch(worktree) != worktree.branch:
-            raise RuntimeError("commit authority requires the verified story branch")
+        if (not worktree.branch.startswith("agent/") or worktree.base_commit is None
+                or self._host.current_branch(worktree) != worktree.branch
+                or not self._host.verifies_worktree(worktree)):
+            raise RuntimeError("commit authority requires a verified host-created story branch")
         for path in self._host.changed_paths_for(worktree):
             self._boundary.require_path(path)
-        for command in self._boundary.allowed_commands():
+        for command in self._boundary.required_checks():
             if not self._host.run_check(worktree, command):
                 raise RuntimeError(f"required check failed: {' '.join(command)}")
         commit = self._host.create_commit(worktree, message)
