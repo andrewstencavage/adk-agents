@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+from adk_agents.contracts import SpecialistTask, TaskStatus
 from adk_agents.contracts import SpecialistType
-from adk_agents.specialists import CodingBoundary, RateLimited, ResearchSpecialist, SearchHit
+from adk_agents.specialists import CodingBoundary, DuckDuckGoSearchAdapter, RateLimited, ResearchSpecialist, SearchHit
 from adk_agents.workflow import ReviewGate, ReviewStatus
 from adk_agents.operations import IncidentTracker, ServicePolicy
 from adk_agents.operations import PersistentIncidentTracker
@@ -31,14 +34,54 @@ def test_research_emits_a_redacted_evidence_reference_through_its_typed_writer()
         evidence_writer=lambda payload: "sha256:" + str(len(payload)),
     ).research("bounded question")
 
-    assert report.evidence_refs == ("sha256:3",)
+    assert report.evidence_refs == ["sha256:3"]
 
 
 def test_research_reports_rate_limit_exhaustion_without_provider_fallback():
     report = ResearchSpecialist(lambda _question: (_ for _ in ()).throw(RateLimited()), max_attempts=1).research("bounded question")
 
     assert report.exhausted is True
-    assert report.claims == ()
+    assert report.claims == []
+
+
+def test_research_specialist_returns_typed_cited_findings_for_a_dispatched_task():
+    task = SpecialistTask(
+        control_issue_ref="#1",
+        story_ref="#15",
+        dispatch_id="research-dispatch-15",
+        specialist=SpecialistType.RESEARCH,
+        objective="Find an authoritative answer.",
+        acceptance_criteria=["Return cited, uncertainty-aware findings."],
+        requested_by="user",
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+        budget_steps=1,
+    )
+
+    result = ResearchSpecialist(
+        lambda _question: [SearchHit("A claim", "https://example.test/source")]
+    ).run(task)
+
+    assert result.status is TaskStatus.COMPLETED
+    assert result.research_report is not None
+    assert result.research_report.claims[0].source_url == "https://example.test/source"
+    assert result.research_report.uncertainty == "Sources may be incomplete."
+
+
+def test_duckduckgo_adapter_exposes_only_cited_search_hits():
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def text(self, _query: str, *, max_results: int):
+            assert max_results == 10
+            return [{"body": "A claim", "href": "https://example.test/source"}]
+
+    hits = tuple(DuckDuckGoSearchAdapter(Client)("bounded question"))
+
+    assert hits == (SearchHit("A claim", "https://example.test/source"),)
 
 
 def test_coding_boundary_reports_a_scope_gap_without_running_an_unapproved_command(tmp_path):

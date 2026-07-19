@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local ADK coding-agent system"
 requires-python = ">=3.10"
 dependencies = [
+  "duckduckgo-search>=7,<9",
   "google-adk~=2.5.0",
   "pydantic>=2.8,<3",
 ]
