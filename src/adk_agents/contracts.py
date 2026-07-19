@@ -82,6 +82,33 @@ class BoardUpdateRequest(BaseModel):
     rationale: Annotated[str, Field(min_length=1, max_length=500)]
 
 
+class ResearchClaim(BaseModel):
+    """A research finding paired with its public source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    text: Annotated[str, Field(min_length=1, max_length=2_000)]
+    source_url: Annotated[str, Field(pattern=r"^https?://[^\s]+$", max_length=2_048)]
+
+
+class ResearchReport(BaseModel):
+    """Typed research findings, including the limits of the evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    claims: Annotated[list[ResearchClaim], Field(max_length=32)] = Field(default_factory=list)
+    uncertainty: Annotated[str, Field(min_length=1, max_length=1_000)]
+    evidence_refs: Annotated[list[str], Field(max_length=32)] = Field(default_factory=list)
+    exhausted: bool = False
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def evidence_refs_are_safe(cls, refs: list[str]) -> list[str]:
+        if any(len(ref) > 256 or not ref.startswith("sha256:") for ref in refs):
+            raise ValueError("research evidence references must be sha256 digests")
+        return refs
+
+
 class SpecialistResult(BaseModel):
     """A specialist's validated proposal; it never mutates the task board itself."""
 
@@ -92,6 +119,7 @@ class SpecialistResult(BaseModel):
     next_manager_action: Annotated[str, Field(min_length=1, max_length=500)]
     evidence_refs: Annotated[list[str], Field(max_length=32)] = Field(default_factory=list)
     artifact_refs: Annotated[list[str], Field(max_length=32)] = Field(default_factory=list)
+    research_report: ResearchReport | None = None
     board_update_request: BoardUpdateRequest | None = None
     scope_gap: Annotated[str, Field(max_length=1_000)] | None = None
     escalation_reason: Annotated[str, Field(max_length=1_000)] | None = None
