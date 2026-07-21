@@ -63,3 +63,50 @@ def test_asks_one_focused_question_once_for_an_incomplete_create_request(tmp_pat
     assert len(control_issue.replies) == 1
     assert "What observable behavior will show that the story is complete?" in control_issue.replies[0][1]
     assert "intake-" in control_issue.replies[0][1]
+
+
+def test_asks_for_an_objective_when_create_has_no_source_request(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+
+    outcome = service.handle(comment("comment-1", "/create"))
+
+    assert outcome.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert "What outcome should this story achieve?" in control_issue.replies[0][1]
+
+
+def test_asks_for_a_testable_criterion_when_request_only_says_it_must_be_good(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+
+    outcome = service.handle(comment("comment-1", "/create\nAdd CSV export. It must be good."))
+
+    assert outcome.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert "What observable behavior will show that the story is complete?" in control_issue.replies[0][1]
+
+
+def test_asks_for_a_specialist_when_routing_is_ambiguous(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    request = "/create\nResearch and implement an export format. It must include visible headers."
+
+    outcome = service.handle(comment("comment-1", request))
+
+    assert outcome.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert "Which Primary specialist should own this story?" in control_issue.replies[0][1]
+
+
+def test_renders_stated_context_and_constraints_instead_of_none_stated(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    request = """/create
+Add CSV export to the reporting screen. The CSV must export visible headers.
+Context: Operators use the reporting screen during monthly close.
+Constraints and dependencies: Preserve the current filters."""
+
+    outcome = service.handle(comment("comment-1", request))
+
+    assert outcome.kind is IntakeOutcomeKind.ASSESSED
+    assert outcome.assessment is not None
+    assert "## Context\n\nOperators use the reporting screen during monthly close." in outcome.assessment.canonical_body
+    assert "## Constraints and dependencies\n\nPreserve the current filters." in outcome.assessment.canonical_body
