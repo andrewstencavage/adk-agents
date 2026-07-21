@@ -110,3 +110,30 @@ Constraints and dependencies: Preserve the current filters."""
     assert outcome.assessment is not None
     assert "## Context\n\nOperators use the reporting screen during monthly close." in outcome.assessment.canonical_body
     assert "## Constraints and dependencies\n\nPreserve the current filters." in outcome.assessment.canonical_body
+
+
+def test_accepts_regular_prose_with_an_observable_completion_condition(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    request = "/create\nAdd CSV export that exports currently filtered rows with visible headers."
+
+    outcome = service.handle(comment("comment-1", request))
+
+    assert outcome.kind is IntakeOutcomeKind.ASSESSED
+    assert outcome.assessment is not None
+    assert "- Add CSV export that exports currently filtered rows with visible headers." in outcome.assessment.canonical_body
+
+
+def test_does_not_treat_a_declared_constraint_as_an_acceptance_criterion(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    request = """/create
+Add CSV export. The CSV must include visible headers.
+Constraints and dependencies: It must preserve current filters."""
+
+    outcome = service.handle(comment("comment-1", request))
+
+    assert outcome.kind is IntakeOutcomeKind.ASSESSED
+    assert outcome.assessment is not None
+    assert "- The CSV must include visible headers." in outcome.assessment.canonical_body
+    assert "- Constraints and dependencies: It must preserve current filters." not in outcome.assessment.canonical_body
