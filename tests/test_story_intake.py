@@ -250,3 +250,19 @@ def test_replays_a_pending_clarification_after_reply_failure_without_duplicate_r
     assert recovered.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
     assert replay.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
     assert len(control_issue.replies) == 2
+
+
+def test_rejects_a_replayed_comment_with_a_different_intake_or_answer(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    first = service.handle(comment("comment-1", "/create\nAdd CSV export."))
+    second = service.handle(comment("comment-2", "/create\nAdd PDF export."))
+    continuation = comment("comment-3", f"/continue {first.intake_id}\nIt must include visible headers.")
+
+    accepted = service.handle(continuation)
+    changed_target = service.handle(comment("comment-3", f"/continue {second.intake_id}\nIt must include visible headers."))
+    changed_answer = service.handle(comment("comment-3", f"/continue {first.intake_id}\nIt must export filtered rows."))
+
+    assert accepted.kind is IntakeOutcomeKind.ASSESSED
+    assert changed_target.kind is IntakeOutcomeKind.REJECTED
+    assert changed_answer.kind is IntakeOutcomeKind.REJECTED
