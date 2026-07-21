@@ -127,12 +127,16 @@ class StoryIntakeService:
     def _handle_continuation(self, comment: ControlComment, intake_id: str, answer: str) -> IntakeOutcome:
         with self._connect() as database:
             continuation = database.execute(
-                "SELECT reply_id FROM story_intake_continuation WHERE comment_id = ?", (comment.comment_id,)
+                "SELECT intake_id, answer, reply_id FROM story_intake_continuation WHERE comment_id = ?", (comment.comment_id,)
             ).fetchone()
             intake = database.execute(
                 "SELECT source_request, state, assessment_json FROM story_intake WHERE intake_id = ?", (intake_id,)
             ).fetchone()
             if intake is None:
+                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+            if continuation is not None and (
+                continuation["intake_id"] != intake_id or continuation["answer"] != answer
+            ):
                 return IntakeOutcome(IntakeOutcomeKind.REJECTED)
             if continuation is not None and intake["state"] == IntakeState.ASSESSMENT_READY.value:
                 assessment = _stored_assessment(intake["assessment_json"])
