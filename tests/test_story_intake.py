@@ -12,10 +12,20 @@ from adk_agents.story_intake import (
 @dataclass
 class FakeControlIssue:
     replies: list[tuple[str, str]]
+    fail_next_reply: bool = False
 
     def reply(self, comment: ControlComment, body: str) -> str:
+        if self.fail_next_reply:
+            self.fail_next_reply = False
+            raise RuntimeError("temporary reply failure")
         self.replies.append((comment.comment_id, body))
         return f"reply-{len(self.replies)}"
+
+    def find_reply(self, comment: ControlComment, event_id: str) -> str | None:
+        return next(
+            (f"reply-{index}" for index, (_, body) in enumerate(self.replies, start=1) if event_id in body),
+            None,
+        )
 
 
 def comment(comment_id: str, body: str) -> ControlComment:
@@ -180,7 +190,7 @@ def test_rejects_unknown_malformed_replayed_and_closed_continuations_without_rep
     assert unknown.kind is IntakeOutcomeKind.REJECTED
     assert malformed.kind is IntakeOutcomeKind.REJECTED
     assert complete.kind is IntakeOutcomeKind.ASSESSED
-    assert replayed.kind is IntakeOutcomeKind.REJECTED
+    assert replayed.kind is IntakeOutcomeKind.ASSESSED
     assert closed.kind is IntakeOutcomeKind.REJECTED
     assert len(control_issue.replies) == 1
 
@@ -204,3 +214,39 @@ def test_continuation_survives_restart_and_can_resolve_the_next_focused_question
     assert complete.kind is IntakeOutcomeKind.ASSESSED
     assert complete.assessment is not None
     assert complete.assessment.primary_specialist == "Coding"
+
+
+def test_replaying_a_completed_continuation_after_restart_returns_the_durable_assessment(tmp_path):
+    database = tmp_path / "record.sqlite3"
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(database, control_issue)
+    pending = service.handle(comment("comment-1", "/create\nAdd CSV export."))
+    continuation = comment("comment-2", f"/continue {pending.intake_id}\nIt must include visible headers.")
+
+    first = service.handle(continuation)
+    replay = StoryIntakeService(database, control_issue).handle(continuation)
+
+    assert first.kind is IntakeOutcomeKind.ASSESSED
+    assert replay.kind is IntakeOutcomeKind.ASSESSED
+    assert replay.assessment == first.assessment
+
+
+def test_replays_a_pending_clarification_after_reply_failure_without_duplicate_reply(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    pending = service.handle(comment("comment-1", "/create\nResearch and implement CSV export."))
+    continuation = comment("comment-2", f"/continue {pending.intake_id}\nIt must include visible headers.")
+    control_issue.fail_next_reply = True
+
+    try:
+        service.handle(continuation)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected the simulated reply failure")
+    recovered = service.handle(continuation)
+    replay = service.handle(continuation)
+
+    assert recovered.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert replay.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert len(control_issue.replies) == 2

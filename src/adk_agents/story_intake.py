@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import sqlite3
@@ -25,6 +26,8 @@ class ControlIssueGateway(Protocol):
     """The narrow Control-issue reply capability needed during admission."""
 
     def reply(self, comment: ControlComment, body: str) -> str: ...
+
+    def find_reply(self, comment: ControlComment, event_id: str) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -84,15 +87,19 @@ class StoryIntakeService:
                     source_request TEXT NOT NULL DEFAULT '',
                     intake_id TEXT NOT NULL,
                     state TEXT NOT NULL,
-                    reply_id TEXT
+                    reply_id TEXT,
+                    assessment_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS story_intake_continuation (
                     comment_id TEXT PRIMARY KEY,
                     intake_id TEXT NOT NULL,
-                    answer TEXT NOT NULL
+                    answer TEXT NOT NULL,
+                    reply_id TEXT
                 )"""
             )
             self._add_source_request_column(database)
+            self._add_column(database, "story_intake", "assessment_json TEXT")
+            self._add_column(database, "story_intake_continuation", "reply_id TEXT")
 
     def handle(self, comment: ControlComment) -> IntakeOutcome:
         source_request = _source_request(comment.body)
@@ -109,27 +116,34 @@ class StoryIntakeService:
         intake_id, reply_sent = self._begin(comment, source_request)
         assessment = _assess(source_request)
         if assessment is not None:
+            self._record_assessment(intake_id, assessment)
             return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
 
         if not reply_sent:
-            reply_id = self._control_issue.reply(comment, _clarification(intake_id, source_request))
+            reply_id = self._reply_once(comment, intake_id, _clarification(intake_id, source_request))
             self._record_reply(comment.comment_id, reply_id)
         return IntakeOutcome(IntakeOutcomeKind.NEEDS_CLARIFICATION, intake_id=intake_id)
 
     def _handle_continuation(self, comment: ControlComment, intake_id: str, answer: str) -> IntakeOutcome:
         with self._connect() as database:
-            seen = database.execute(
-                "SELECT 1 FROM story_intake_continuation WHERE comment_id = ?", (comment.comment_id,)
+            continuation = database.execute(
+                "SELECT reply_id FROM story_intake_continuation WHERE comment_id = ?", (comment.comment_id,)
             ).fetchone()
             intake = database.execute(
-                "SELECT source_request, state FROM story_intake WHERE intake_id = ?", (intake_id,)
+                "SELECT source_request, state, assessment_json FROM story_intake WHERE intake_id = ?", (intake_id,)
             ).fetchone()
-            if seen is not None or intake is None or intake["state"] != IntakeState.AWAITING_CONTINUATION.value:
+            if intake is None:
                 return IntakeOutcome(IntakeOutcomeKind.REJECTED)
-            database.execute(
-                "INSERT INTO story_intake_continuation(comment_id, intake_id, answer) VALUES (?, ?, ?)",
-                (comment.comment_id, intake_id, answer),
-            )
+            if continuation is not None and intake["state"] == IntakeState.ASSESSMENT_READY.value:
+                assessment = _stored_assessment(intake["assessment_json"])
+                return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
+            if intake["state"] != IntakeState.AWAITING_CONTINUATION.value:
+                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+            if continuation is None:
+                database.execute(
+                    "INSERT INTO story_intake_continuation(comment_id, intake_id, answer) VALUES (?, ?, ?)",
+                    (comment.comment_id, intake_id, answer),
+                )
             answers = tuple(
                 row["answer"]
                 for row in database.execute(
@@ -139,19 +153,23 @@ class StoryIntakeService:
         source_request = "\n\n".join((intake["source_request"], *answers))
         assessment = _assess(source_request)
         if assessment is not None:
-            with self._connect() as database:
-                database.execute(
-                    "UPDATE story_intake SET state = ? WHERE intake_id = ?",
-                    (IntakeState.ASSESSMENT_READY.value, intake_id),
-                )
+            self._record_assessment(intake_id, assessment)
             return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
 
-        reply_id = self._control_issue.reply(comment, _clarification(intake_id, source_request))
+        reply_id = self._reply_once(comment, intake_id, _clarification(intake_id, source_request))
         with self._connect() as database:
             database.execute(
-                "UPDATE story_intake SET reply_id = ? WHERE intake_id = ?", (reply_id, intake_id)
+                "UPDATE story_intake_continuation SET reply_id = ? WHERE comment_id = ?", (reply_id, comment.comment_id)
             )
         return IntakeOutcome(IntakeOutcomeKind.NEEDS_CLARIFICATION, intake_id=intake_id)
+
+    def _reply_once(self, comment: ControlComment, intake_id: str, message: str) -> str:
+        event_id = f"{intake_id}:{comment.comment_id}"
+        existing = self._control_issue.find_reply(comment, event_id)
+        if existing is not None:
+            return existing
+        body = f"<!-- adk-intake-event:v1 {event_id} -->\n{message}"
+        return self._control_issue.reply(comment, body)
 
     def _begin(self, comment: ControlComment, source_request: str) -> tuple[str, bool]:
         digest = hashlib.sha256(source_request.encode()).hexdigest()
@@ -178,16 +196,28 @@ class StoryIntakeService:
                 (IntakeState.AWAITING_CONTINUATION.value, reply_id, comment_id),
             )
 
+    def _record_assessment(self, intake_id: str, assessment: StoryAssessment) -> None:
+        with self._connect() as database:
+            database.execute(
+                "UPDATE story_intake SET state = ?, assessment_json = ? WHERE intake_id = ?",
+                (IntakeState.ASSESSMENT_READY.value, _serialize_assessment(assessment), intake_id),
+            )
+
     def _connect(self) -> sqlite3.Connection:
         database = sqlite3.connect(self._path)
         database.row_factory = sqlite3.Row
         return database
 
+    @classmethod
+    def _add_source_request_column(cls, database: sqlite3.Connection) -> None:
+        cls._add_column(database, "story_intake", "source_request TEXT NOT NULL DEFAULT ''")
+
     @staticmethod
-    def _add_source_request_column(database: sqlite3.Connection) -> None:
-        columns = {row["name"] for row in database.execute("PRAGMA table_info(story_intake)")}
-        if "source_request" not in columns:
-            database.execute("ALTER TABLE story_intake ADD COLUMN source_request TEXT NOT NULL DEFAULT ''")
+    def _add_column(database: sqlite3.Connection, table: str, definition: str) -> None:
+        name = definition.split()[0]
+        columns = {row["name"] for row in database.execute(f"PRAGMA table_info({table})")}
+        if name not in columns:
+            database.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
 def _source_request(body: str) -> str | None:
@@ -334,4 +364,30 @@ def _clarification(intake_id: str, source_request: str) -> str:
         "Continue this intake with:\n\n"
         f"`/continue {intake_id}`\n"
         "<your answer>"
+    )
+
+
+def _serialize_assessment(assessment: StoryAssessment) -> str:
+    return json.dumps(
+        {
+            "title": assessment.title,
+            "objective": assessment.objective,
+            "acceptance_criteria": assessment.acceptance_criteria,
+            "primary_specialist": assessment.primary_specialist,
+            "canonical_body": assessment.canonical_body,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _stored_assessment(value: str | None) -> StoryAssessment:
+    if value is None:
+        raise RuntimeError("ready Story intake is missing its durable assessment")
+    data = json.loads(value)
+    return StoryAssessment(
+        title=data["title"],
+        objective=data["objective"],
+        acceptance_criteria=tuple(data["acceptance_criteria"]),
+        primary_specialist=data["primary_specialist"],
+        canonical_body=data["canonical_body"],
     )
