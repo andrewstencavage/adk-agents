@@ -44,6 +44,13 @@ class IntakeOutcomeKind(str, Enum):
     NEEDS_CLARIFICATION = "needs_clarification"
 
 
+class IntakeState(str, Enum):
+    """Persisted states for a Story intake before it becomes a Specialist story."""
+
+    ASSESSING = "assessing"
+    AWAITING_CONTINUATION = "awaiting_continuation"
+
+
 @dataclass(frozen=True)
 class IntakeOutcome:
     kind: IntakeOutcomeKind
@@ -98,7 +105,7 @@ class StoryIntakeService:
             intake_id = f"intake-{secrets.token_hex(4)}"
             database.execute(
                 "INSERT INTO story_intake(comment_id, source_digest, intake_id, state) VALUES (?, ?, ?, ?)",
-                (comment.comment_id, digest, intake_id, "assessing"),
+                (comment.comment_id, digest, intake_id, IntakeState.ASSESSING.value),
             )
             return intake_id, False
 
@@ -106,7 +113,7 @@ class StoryIntakeService:
         with self._connect() as database:
             database.execute(
                 "UPDATE story_intake SET state = ?, reply_id = ? WHERE comment_id = ?",
-                ("awaiting_continuation", reply_id, comment_id),
+                (IntakeState.AWAITING_CONTINUATION.value, reply_id, comment_id),
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -122,8 +129,7 @@ def _source_request(body: str) -> str | None:
             continue
         if line.strip() != "/create":
             return None
-        request = "\n".join(lines[index + 1 :]).strip()
-        return request or None
+        return "\n".join(lines[index + 1 :]).strip()
     return None
 
 
@@ -132,7 +138,7 @@ def _assess(source_request: str) -> StoryAssessment | None:
     if not sentences:
         return None
     objective = sentences[0]
-    criteria = tuple(sentence for sentence in sentences if re.search(r"\b(must|should|ensure)\b", sentence, re.IGNORECASE))
+    criteria = tuple(sentence for sentence in sentences if _is_testable_criterion(sentence))
     specialist = _primary_specialist(objective)
     if not criteria or specialist is None:
         return None
@@ -141,38 +147,75 @@ def _assess(source_request: str) -> StoryAssessment | None:
         objective=objective,
         acceptance_criteria=criteria,
         primary_specialist=specialist,
-        canonical_body=_canonical_body(objective, criteria, source_request),
+        canonical_body=_canonical_body(
+            objective,
+            criteria,
+            source_request,
+            context=_named_section(source_request, "Context"),
+            constraints=_named_section(source_request, "Constraints and dependencies"),
+        ),
     )
 
 
 def _primary_specialist(objective: str) -> str | None:
     value = objective.lower()
+    matches: set[str] = set()
     if any(word in value for word in ("research", "investigate", "find sources")):
-        return "Research"
+        matches.add("Research")
     if any(word in value for word in ("review", "audit")):
-        return "Review"
+        matches.add("Review")
     if any(word in value for word in ("plan", "prioritize", "backlog")):
-        return "Scrum Master"
+        matches.add("Scrum Master")
     if any(word in value for word in ("add", "build", "create", "fix", "implement", "update")):
-        return "Coding"
-    return None
+        matches.add("Coding")
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
-def _canonical_body(objective: str, criteria: tuple[str, ...], source_request: str) -> str:
+def _is_testable_criterion(sentence: str) -> bool:
+    if re.search(r"\b(must|should|ensure)\b", sentence, re.IGNORECASE) is None:
+        return False
+    return re.search(r"\b(good|better|correct|work|works|working)\b", sentence, re.IGNORECASE) is None
+
+
+def _named_section(source_request: str, name: str) -> str | None:
+    match = re.search(rf"(?im)^{re.escape(name)}:\s*(.+)$", source_request)
+    return None if match is None else match.group(1).strip()
+
+
+def _canonical_body(
+    objective: str,
+    criteria: tuple[str, ...],
+    source_request: str,
+    *,
+    context: str | None,
+    constraints: str | None,
+) -> str:
     criteria_body = "\n".join(f"- {criterion}" for criterion in criteria)
+    context_body = context or "None stated."
+    constraints_body = constraints or "None stated."
     return (
         f"## Objective\n\n{objective}\n\n"
-        "## Context\n\nNone stated.\n\n"
+        f"## Context\n\n{context_body}\n\n"
         f"## Acceptance criteria\n\n{criteria_body}\n\n"
-        "## Constraints and dependencies\n\nNone stated.\n\n"
+        f"## Constraints and dependencies\n\n{constraints_body}\n\n"
         f"## Source request\n\n{source_request}\n"
     )
 
 
 def _clarification(intake_id: str, source_request: str) -> str:
-    del source_request
+    if not source_request:
+        question = "What outcome should this story achieve?"
+    else:
+        sentences = tuple(sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", source_request) if sentence.strip())
+        criteria = tuple(sentence for sentence in sentences if _is_testable_criterion(sentence))
+        if not criteria:
+            question = "What observable behavior will show that the story is complete?"
+        elif _primary_specialist(sentences[0]) is None:
+            question = "Which Primary specialist should own this story?"
+        else:
+            question = "What outcome should this story achieve?"
     return (
-        "What observable behavior will show that the story is complete?\n\n"
+        f"{question}\n\n"
         "Continue this intake with:\n\n"
         f"`/continue {intake_id}`\n"
         "<your answer>"
