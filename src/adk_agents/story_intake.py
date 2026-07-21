@@ -42,6 +42,8 @@ class StoryBoardGateway(Protocol):
 
     def create_issue(self, title: str, body: str) -> PublishedStory: ...
 
+    def find_story(self, marker: str) -> PublishedStory | None: ...
+
     def add_label(self, story: PublishedStory, label: str) -> None: ...
 
     def add_to_project(self, story: PublishedStory) -> None: ...
@@ -152,7 +154,12 @@ class StoryIntakeService:
             raise RuntimeError("Story intake publishing requires a task-board gateway")
         if self._published(outcome.intake_id):
             return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
-        story = self._story_board.create_issue(outcome.assessment.title, outcome.assessment.canonical_body)
+        marker = f"<!-- adk-intake:v1 {outcome.intake_id} -->"
+        story = self._story_board.find_story(marker)
+        if story is None:
+            story = self._story_board.create_issue(
+                outcome.assessment.title, f"{marker}\n{outcome.assessment.canonical_body}"
+            )
         self._story_board.add_label(story, "adk:story")
         self._story_board.add_to_project(story)
         self._story_board.set_backlog(story)
