@@ -86,6 +86,11 @@ def test_publishes_a_complete_assessment_as_a_backlog_specialist_story(tmp_path)
     assert "https://github.test/acme/adk-agents/issues/57" in control_issue.replies[0][1]
     assert "move it to Ready to approve" in control_issue.replies[0][1]
 
+    replay = service.create(comment("comment-1", request))
+
+    assert replay.kind is IntakeOutcomeKind.STORY_CREATED
+    assert len(board.created) == 1
+
 
 def test_assesses_a_complete_create_request_into_canonical_story_content(tmp_path):
     control_issue = FakeControlIssue([])

@@ -116,7 +116,8 @@ class StoryIntakeService:
                     intake_id TEXT NOT NULL,
                     state TEXT NOT NULL,
                     reply_id TEXT,
-                    assessment_json TEXT
+                    assessment_json TEXT,
+                    published_story_number INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS story_intake_continuation (
                     comment_id TEXT PRIMARY KEY,
@@ -127,6 +128,7 @@ class StoryIntakeService:
             )
             self._add_source_request_column(database)
             self._add_column(database, "story_intake", "assessment_json TEXT")
+            self._add_column(database, "story_intake", "published_story_number INTEGER")
             self._add_column(database, "story_intake_continuation", "reply_id TEXT")
 
     def handle(self, comment: ControlComment) -> IntakeOutcome:
@@ -148,6 +150,8 @@ class StoryIntakeService:
             return outcome
         if self._story_board is None:
             raise RuntimeError("Story intake publishing requires a task-board gateway")
+        if self._published(outcome.intake_id):
+            return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
         story = self._story_board.create_issue(outcome.assessment.title, outcome.assessment.canonical_body)
         self._story_board.add_label(story, "adk:story")
         self._story_board.add_to_project(story)
@@ -158,6 +162,7 @@ class StoryIntakeService:
             "It is in Backlog; move it to Ready to approve and dispatch it."
         )
         self._reply_once(comment, outcome.intake_id or comment.comment_id, confirmation)
+        self._record_published(outcome.intake_id, story)
         return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
 
     def _handle_create(self, comment: ControlComment, source_request: str) -> IntakeOutcome:
@@ -253,6 +258,23 @@ class StoryIntakeService:
             database.execute(
                 "UPDATE story_intake SET state = ?, assessment_json = ? WHERE intake_id = ?",
                 (IntakeState.ASSESSMENT_READY.value, _serialize_assessment(assessment), intake_id),
+            )
+
+    def _published(self, intake_id: str | None) -> bool:
+        if intake_id is None:
+            return False
+        with self._connect() as database:
+            row = database.execute(
+                "SELECT published_story_number FROM story_intake WHERE intake_id = ?", (intake_id,)
+            ).fetchone()
+        return row is not None and row["published_story_number"] is not None
+
+    def _record_published(self, intake_id: str | None, story: PublishedStory) -> None:
+        if intake_id is None:
+            raise RuntimeError("published Story intake must have an intake ID")
+        with self._connect() as database:
+            database.execute(
+                "UPDATE story_intake SET published_story_number = ? WHERE intake_id = ?", (story.number, intake_id)
             )
 
     def _connect(self) -> sqlite3.Connection:
