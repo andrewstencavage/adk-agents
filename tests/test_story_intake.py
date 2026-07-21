@@ -137,3 +137,70 @@ Constraints and dependencies: It must preserve current filters."""
     assert outcome.assessment is not None
     assert "- The CSV must include visible headers." in outcome.assessment.canonical_body
     assert "- Constraints and dependencies: It must preserve current filters." not in outcome.assessment.canonical_body
+
+
+def test_continuation_combines_with_pending_source_request_to_complete_assessment(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    pending = service.handle(comment("comment-1", "/create\nAdd CSV export to the reporting screen."))
+
+    outcome = service.handle(
+        comment("comment-2", f"/continue {pending.intake_id}\nIt must export currently filtered rows with visible headers.")
+    )
+
+    assert outcome.kind is IntakeOutcomeKind.ASSESSED
+    assert outcome.assessment is not None
+    assert "Add CSV export to the reporting screen.\n\nIt must export currently filtered rows with visible headers." in outcome.assessment.canonical_body
+    assert len(control_issue.replies) == 1
+
+
+def test_incomplete_continuation_posts_only_its_next_focused_question(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    pending = service.handle(comment("comment-1", "/create\nResearch and implement CSV export."))
+
+    outcome = service.handle(comment("comment-2", f"/continue {pending.intake_id}\nIt must include visible headers."))
+
+    assert outcome.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert len(control_issue.replies) == 2
+    assert "Which Primary specialist should own this story?" in control_issue.replies[-1][1]
+
+
+def test_rejects_unknown_malformed_replayed_and_closed_continuations_without_replying(tmp_path):
+    control_issue = FakeControlIssue([])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue)
+    pending = service.handle(comment("comment-1", "/create\nAdd CSV export."))
+
+    unknown = service.handle(comment("comment-2", "/continue intake-unknown\nIt must include headers."))
+    malformed = service.handle(comment("comment-3", "/continue\nIt must include headers."))
+    complete = service.handle(comment("comment-4", f"/continue {pending.intake_id}\nIt must include headers."))
+    replayed = service.handle(comment("comment-4", f"/continue {pending.intake_id}\nIt must include headers."))
+    closed = service.handle(comment("comment-5", f"/continue {pending.intake_id}\nIt must export filtered rows."))
+
+    assert unknown.kind is IntakeOutcomeKind.REJECTED
+    assert malformed.kind is IntakeOutcomeKind.REJECTED
+    assert complete.kind is IntakeOutcomeKind.ASSESSED
+    assert replayed.kind is IntakeOutcomeKind.REJECTED
+    assert closed.kind is IntakeOutcomeKind.REJECTED
+    assert len(control_issue.replies) == 1
+
+
+def test_continuation_survives_restart_and_can_resolve_the_next_focused_question(tmp_path):
+    database = tmp_path / "record.sqlite3"
+    first_control_issue = FakeControlIssue([])
+    first_service = StoryIntakeService(database, first_control_issue)
+    pending = first_service.handle(comment("comment-1", "/create\nResearch and implement CSV export."))
+
+    second_control_issue = FakeControlIssue([])
+    restarted_service = StoryIntakeService(database, second_control_issue)
+    still_ambiguous = restarted_service.handle(
+        comment("comment-2", f"/continue {pending.intake_id}\nIt must include visible headers.")
+    )
+    complete = restarted_service.handle(
+        comment("comment-3", f"/continue {pending.intake_id}\nPrimary specialist: Coding")
+    )
+
+    assert still_ambiguous.kind is IntakeOutcomeKind.NEEDS_CLARIFICATION
+    assert complete.kind is IntakeOutcomeKind.ASSESSED
+    assert complete.assessment is not None
+    assert complete.assessment.primary_specialist == "Coding"
