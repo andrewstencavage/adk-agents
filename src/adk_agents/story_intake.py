@@ -58,6 +58,15 @@ class IntakeOutcome:
     intake_id: str | None = None
 
 
+@dataclass(frozen=True)
+class _RequestDetails:
+    objective: str | None
+    acceptance_criteria: tuple[str, ...]
+    primary_specialist: str | None
+    context: str | None
+    constraints: str | None
+
+
 class StoryIntakeService:
     """Admits `/create` Control comments without creating task-board work."""
 
@@ -134,25 +143,22 @@ def _source_request(body: str) -> str | None:
 
 
 def _assess(source_request: str) -> StoryAssessment | None:
-    sentences = tuple(sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", source_request) if sentence.strip())
-    if not sentences:
+    details = _request_details(source_request)
+    if details.objective is None:
         return None
-    objective = sentences[0]
-    criteria = tuple(sentence for sentence in sentences if _is_testable_criterion(sentence))
-    specialist = _primary_specialist(objective)
-    if not criteria or specialist is None:
+    if not details.acceptance_criteria or details.primary_specialist is None:
         return None
     return StoryAssessment(
-        title=objective.rstrip(".!?")[:120],
-        objective=objective,
-        acceptance_criteria=criteria,
-        primary_specialist=specialist,
+        title=details.objective.rstrip(".!?")[:120],
+        objective=details.objective,
+        acceptance_criteria=details.acceptance_criteria,
+        primary_specialist=details.primary_specialist,
         canonical_body=_canonical_body(
-            objective,
-            criteria,
+            details.objective,
+            details.acceptance_criteria,
             source_request,
-            context=_named_section(source_request, "Context"),
-            constraints=_named_section(source_request, "Constraints and dependencies"),
+            context=details.context,
+            constraints=details.constraints,
         ),
     )
 
@@ -172,14 +178,42 @@ def _primary_specialist(objective: str) -> str | None:
 
 
 def _is_testable_criterion(sentence: str) -> bool:
-    if re.search(r"\b(must|should|ensure)\b", sentence, re.IGNORECASE) is None:
+    if re.search(r"\b(good|better|correct|work|works|working)\b", sentence, re.IGNORECASE) is not None:
         return False
-    return re.search(r"\b(good|better|correct|work|works|working)\b", sentence, re.IGNORECASE) is None
+    if re.search(r"\b(must|should|ensure)\b", sentence, re.IGNORECASE) is not None:
+        return True
+    return (
+        re.search(r"\b(that|with|including|which|where)\b", sentence, re.IGNORECASE) is not None
+        and re.search(r"\b(export|include|preserve|display|create|return|save|send)\b", sentence, re.IGNORECASE) is not None
+    )
 
 
 def _named_section(source_request: str, name: str) -> str | None:
     match = re.search(rf"(?im)^{re.escape(name)}:\s*(.+)$", source_request)
     return None if match is None else match.group(1).strip()
+
+
+def _request_details(source_request: str) -> _RequestDetails:
+    context = _named_section(source_request, "Context")
+    constraints = _named_section(source_request, "Constraints and dependencies")
+    content_lines = tuple(
+        line
+        for line in source_request.splitlines()
+        if not re.match(r"(?i)^\s*(Context|Constraints and dependencies):", line)
+    )
+    sentences = tuple(
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", "\n".join(content_lines))
+        if sentence.strip()
+    )
+    objective = sentences[0] if sentences else None
+    return _RequestDetails(
+        objective=objective,
+        acceptance_criteria=tuple(sentence for sentence in sentences if _is_testable_criterion(sentence)),
+        primary_specialist=None if objective is None else _primary_specialist(objective),
+        context=context,
+        constraints=constraints,
+    )
 
 
 def _canonical_body(
@@ -203,17 +237,15 @@ def _canonical_body(
 
 
 def _clarification(intake_id: str, source_request: str) -> str:
-    if not source_request:
+    details = _request_details(source_request)
+    if details.objective is None:
         question = "What outcome should this story achieve?"
+    elif not details.acceptance_criteria:
+        question = "What observable behavior will show that the story is complete?"
+    elif details.primary_specialist is None:
+        question = "Which Primary specialist should own this story?"
     else:
-        sentences = tuple(sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", source_request) if sentence.strip())
-        criteria = tuple(sentence for sentence in sentences if _is_testable_criterion(sentence))
-        if not criteria:
-            question = "What observable behavior will show that the story is complete?"
-        elif _primary_specialist(sentences[0]) is None:
-            question = "Which Primary specialist should own this story?"
-        else:
-            question = "What outcome should this story achieve?"
+        question = "What outcome should this story achieve?"
     return (
         f"{question}\n\n"
         "Continue this intake with:\n\n"
