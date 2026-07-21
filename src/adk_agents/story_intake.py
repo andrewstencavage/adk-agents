@@ -31,6 +31,27 @@ class ControlIssueGateway(Protocol):
 
 
 @dataclass(frozen=True)
+class PublishedStory:
+    number: int
+    url: str
+    project_item_id: str
+
+
+class StoryBoardGateway(Protocol):
+    """The narrow publishing capability for a complete Specialist story."""
+
+    def create_issue(self, title: str, body: str) -> PublishedStory: ...
+
+    def add_label(self, story: PublishedStory, label: str) -> None: ...
+
+    def add_to_project(self, story: PublishedStory) -> None: ...
+
+    def set_backlog(self, story: PublishedStory) -> None: ...
+
+    def set_primary_specialist(self, story: PublishedStory, specialist: str) -> None: ...
+
+
+@dataclass(frozen=True)
 class StoryAssessment:
     """A complete, pre-creation Specialist story proposal."""
 
@@ -46,6 +67,7 @@ class IntakeOutcomeKind(str, Enum):
     ASSESSED = "assessed"
     NEEDS_CLARIFICATION = "needs_clarification"
     REJECTED = "rejected"
+    STORY_CREATED = "story_created"
 
 
 class IntakeState(str, Enum):
@@ -75,10 +97,16 @@ class _RequestDetails:
 class StoryIntakeService:
     """Admits `/create` Control comments without creating task-board work."""
 
-    def __init__(self, database_path: str | Path, control_issue: ControlIssueGateway) -> None:
+    def __init__(
+        self,
+        database_path: str | Path,
+        control_issue: ControlIssueGateway,
+        story_board: StoryBoardGateway | None = None,
+    ) -> None:
         self._path = Path(database_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._control_issue = control_issue
+        self._story_board = story_board
         with self._connect() as database:
             database.executescript(
                 """CREATE TABLE IF NOT EXISTS story_intake (
@@ -111,6 +139,26 @@ class StoryIntakeService:
         if _first_nonblank_line(comment.body).strip().startswith("/continue"):
             return IntakeOutcome(IntakeOutcomeKind.REJECTED)
         return IntakeOutcome(IntakeOutcomeKind.IGNORED)
+
+    def create(self, comment: ControlComment) -> IntakeOutcome:
+        """Publish one complete assessed intake as a Backlog Specialist story."""
+
+        outcome = self.handle(comment)
+        if outcome.kind is not IntakeOutcomeKind.ASSESSED or outcome.assessment is None:
+            return outcome
+        if self._story_board is None:
+            raise RuntimeError("Story intake publishing requires a task-board gateway")
+        story = self._story_board.create_issue(outcome.assessment.title, outcome.assessment.canonical_body)
+        self._story_board.add_label(story, "adk:story")
+        self._story_board.add_to_project(story)
+        self._story_board.set_backlog(story)
+        self._story_board.set_primary_specialist(story, outcome.assessment.primary_specialist)
+        confirmation = (
+            f"Created {story.url} with proposed Primary specialist {outcome.assessment.primary_specialist}. "
+            "It is in Backlog; move it to Ready to approve and dispatch it."
+        )
+        self._reply_once(comment, outcome.intake_id or comment.comment_id, confirmation)
+        return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
 
     def _handle_create(self, comment: ControlComment, source_request: str) -> IntakeOutcome:
         intake_id, reply_sent = self._begin(comment, source_request)
