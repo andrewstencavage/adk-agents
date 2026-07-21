@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from adk_agents.story_intake import (
     ControlComment,
     IntakeOutcomeKind,
+    PublishedStory,
     StoryIntakeService,
 )
 
@@ -28,6 +29,31 @@ class FakeControlIssue:
         )
 
 
+@dataclass
+class FakeStoryBoard:
+    created: list[tuple[str, str]]
+    labels: list[tuple[int, str]]
+    projects: list[int]
+    backlog: list[str]
+    specialists: list[str]
+
+    def create_issue(self, title: str, body: str) -> PublishedStory:
+        self.created.append((title, body))
+        return PublishedStory(number=57, url="https://github.test/acme/adk-agents/issues/57", project_item_id="item-57")
+
+    def add_label(self, story: PublishedStory, label: str) -> None:
+        self.labels.append((story.number, label))
+
+    def add_to_project(self, story: PublishedStory) -> None:
+        self.projects.append(story.number)
+
+    def set_backlog(self, story: PublishedStory) -> None:
+        self.backlog.append(story.project_item_id)
+
+    def set_primary_specialist(self, story: PublishedStory, specialist: str) -> None:
+        self.specialists.append(specialist)
+
+
 def comment(comment_id: str, body: str) -> ControlComment:
     return ControlComment(comment_id=comment_id, author_login="andrew", body=body)
 
@@ -40,6 +66,25 @@ def test_ignores_an_ordinary_control_issue_comment(tmp_path):
 
     assert outcome.kind is IntakeOutcomeKind.IGNORED
     assert control_issue.replies == []
+
+
+def test_publishes_a_complete_assessment_as_a_backlog_specialist_story(tmp_path):
+    control_issue = FakeControlIssue([])
+    board = FakeStoryBoard([], [], [], [], [])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    request = "/create\nAdd CSV export. It must include visible headers."
+
+    outcome = service.create(comment("comment-1", request))
+
+    assert outcome.kind is IntakeOutcomeKind.STORY_CREATED
+    assert board.created[0][0] == "Add CSV export"
+    assert "## Source request\n\nAdd CSV export. It must include visible headers." in board.created[0][1]
+    assert board.labels == [(57, "adk:story")]
+    assert board.projects == [57]
+    assert board.backlog == ["item-57"]
+    assert board.specialists == ["Coding"]
+    assert "https://github.test/acme/adk-agents/issues/57" in control_issue.replies[0][1]
+    assert "move it to Ready to approve" in control_issue.replies[0][1]
 
 
 def test_assesses_a_complete_create_request_into_canonical_story_content(tmp_path):
