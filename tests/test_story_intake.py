@@ -36,10 +36,22 @@ class FakeStoryBoard:
     projects: list[int]
     backlog: list[str]
     specialists: list[str]
+    stories_by_marker: dict[str, PublishedStory] | None = None
+    lose_create_response: bool = False
 
     def create_issue(self, title: str, body: str) -> PublishedStory:
+        marker = body.split("\n", 1)[0]
+        story = PublishedStory(number=57, url="https://github.test/acme/adk-agents/issues/57", project_item_id="item-57")
+        if self.stories_by_marker is not None:
+            self.stories_by_marker[marker] = story
+        if self.lose_create_response:
+            self.lose_create_response = False
+            raise RuntimeError("lost create response")
         self.created.append((title, body))
-        return PublishedStory(number=57, url="https://github.test/acme/adk-agents/issues/57", project_item_id="item-57")
+        return story
+
+    def find_story(self, marker: str) -> PublishedStory | None:
+        return None if self.stories_by_marker is None else self.stories_by_marker.get(marker)
 
     def add_label(self, story: PublishedStory, label: str) -> None:
         self.labels.append((story.number, label))
@@ -90,6 +102,24 @@ def test_publishes_a_complete_assessment_as_a_backlog_specialist_story(tmp_path)
 
     assert replay.kind is IntakeOutcomeKind.STORY_CREATED
     assert len(board.created) == 1
+
+
+def test_recovers_an_uncertain_issue_creation_from_its_intake_marker(tmp_path):
+    control_issue = FakeControlIssue([])
+    board = FakeStoryBoard([], [], [], [], [], {}, True)
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    request = "/create\nAdd CSV export. It must include visible headers."
+
+    try:
+        service.create(comment("comment-1", request))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected the simulated lost response")
+    recovered = service.create(comment("comment-1", request))
+
+    assert recovered.kind is IntakeOutcomeKind.STORY_CREATED
+    assert board.created == []
 
 
 def test_assesses_a_complete_create_request_into_canonical_story_content(tmp_path):
