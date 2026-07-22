@@ -9,6 +9,10 @@ from urllib.request import Request, urlopen
 from .task_board import BoardComment, BoardConfig, ProjectStory
 
 
+class GitHubRateLimitError(RuntimeError):
+    """A GitHub GraphQL response that is safe to retry within a bounded policy."""
+
+
 class GraphQLTransport(Protocol):
     def execute(self, query: str, variables: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -25,6 +29,8 @@ class GitHubGraphQLTransport:
         with urlopen(request, timeout=30) as response:
             payload = json.load(response)
         if payload.get("errors"):
+            if any("rate limit" in str(error.get("message", "")).lower() for error in payload["errors"]):
+                raise GitHubRateLimitError("GitHub Project query was rate limited")
             raise PermissionError("GitHub Project query was rejected")
         return payload
 
