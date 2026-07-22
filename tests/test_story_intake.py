@@ -49,6 +49,7 @@ class FakeStoryBoard:
     story_projects: set[int] | None = None
     story_specialists: dict[int, str | None] | None = None
     issue_create_calls: int = 0
+    likely_duplicate: PublishedStory | None = None
 
     def create_issue(self, title: str, body: str) -> PublishedStory:
         self.issue_create_calls += 1
@@ -64,6 +65,9 @@ class FakeStoryBoard:
 
     def find_story(self, marker: str) -> PublishedStory | None:
         return None if self.stories_by_marker is None else self.stories_by_marker.get(marker)
+
+    def find_likely_duplicate(self, assessment) -> PublishedStory | None:
+        return self.likely_duplicate
 
     def add_label(self, story: PublishedStory, label: str) -> None:
         self.labels.append((story.number, label))
@@ -143,6 +147,58 @@ def test_publishes_a_complete_assessment_as_a_backlog_specialist_story(tmp_path)
 
     assert replay.kind is IntakeOutcomeKind.STORY_CREATED
     assert len(board.created) == 1
+
+
+def test_non_duplicate_request_creates_a_story_without_confirmation(tmp_path):
+    control_issue = FakeControlIssue([])
+    board = FakeStoryBoard([], [], [], [], [])
+
+    outcome = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board).create(
+        comment("comment-1", "/create\nAdd CSV export. It must include visible headers.")
+    )
+
+    assert outcome.kind is IntakeOutcomeKind.STORY_CREATED
+    assert len(board.created) == 1
+
+
+def test_likely_duplicate_requires_confirmation_before_creating_a_story(tmp_path):
+    control_issue = FakeControlIssue([])
+    existing = PublishedStory(41, "https://github.test/acme/adk-agents/issues/41", "item-41")
+    board = FakeStoryBoard([], [], [], [], [], likely_duplicate=existing)
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+
+    outcome = service.create(comment("comment-1", "/create\nAdd CSV export. It must include visible headers."))
+
+    assert outcome.kind is IntakeOutcomeKind.DUPLICATE_CONFIRMATION_REQUIRED
+    assert board.created == []
+    assert existing.url in control_issue.replies[0][1]
+    assert f"/continue {outcome.intake_id}\nconfirm" in control_issue.replies[0][1]
+
+
+def test_confirmed_likely_duplicate_creates_one_new_canonical_story(tmp_path):
+    control_issue = FakeControlIssue([])
+    board = FakeStoryBoard([], [], [], [], [], likely_duplicate=PublishedStory(41, "https://github.test/existing", "item-41"))
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    pending = service.create(comment("comment-1", "/create\nAdd CSV export. It must include visible headers."))
+
+    confirmed = service.create(comment("comment-2", f"/continue {pending.intake_id}\nconfirm"))
+
+    assert confirmed.kind is IntakeOutcomeKind.STORY_CREATED
+    assert len(board.created) == 1
+
+
+def test_declined_likely_duplicate_leaves_the_existing_story_unchanged(tmp_path):
+    control_issue = FakeControlIssue([])
+    existing = PublishedStory(41, "https://github.test/existing", "item-41")
+    board = FakeStoryBoard([], [], [], [], [], likely_duplicate=existing)
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    pending = service.create(comment("comment-1", "/create\nAdd CSV export. It must include visible headers."))
+
+    declined = service.create(comment("comment-2", f"/continue {pending.intake_id}\ndecline"))
+
+    assert declined.kind is IntakeOutcomeKind.DUPLICATE_DECLINED
+    assert board.created == []
+    assert board.publication_state(existing) == StoryPublicationState(False, False, None, None)
 
 
 def test_recovers_an_uncertain_issue_creation_from_its_intake_marker(tmp_path):

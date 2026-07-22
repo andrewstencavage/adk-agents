@@ -8,6 +8,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
@@ -64,6 +65,8 @@ class StoryBoardGateway(Protocol):
 
     def find_story(self, marker: str) -> PublishedStory | None: ...
 
+    def find_likely_duplicate(self, assessment: StoryAssessment) -> PublishedStory | None: ...
+
     def publication_state(self, story: PublishedStory) -> StoryPublicationState: ...
 
     def add_label(self, story: PublishedStory, label: str) -> None: ...
@@ -93,6 +96,9 @@ class IntakeOutcomeKind(str, Enum):
     REJECTED = "rejected"
     STORY_CREATED = "story_created"
     CONFLICT = "conflict"
+    DUPLICATE_CONFIRMATION_REQUIRED = "duplicate_confirmation_required"
+    DUPLICATE_DECLINED = "duplicate_declined"
+    DUPLICATE_EXPIRED = "duplicate_expired"
 
 
 class IntakeState(str, Enum):
@@ -101,6 +107,7 @@ class IntakeState(str, Enum):
     ASSESSING = "assessing"
     AWAITING_CONTINUATION = "awaiting_continuation"
     ASSESSMENT_READY = "assessment_ready"
+    AWAITING_DUPLICATE_CONFIRMATION = "awaiting_duplicate_confirmation"
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,18 @@ class StoryIntakeService:
         if self._story_board is None:
             raise RuntimeError("Story intake publishing requires a task-board gateway")
         intake = self._intake(outcome.intake_id)
+        if intake.duplicate_confirmation != "confirmed":
+            duplicate = self._story_board.find_likely_duplicate(outcome.assessment)
+            if duplicate is not None:
+                expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+                self._store.request_duplicate_confirmation(
+                    intake.intake_id, IntakeState.AWAITING_DUPLICATE_CONFIRMATION.value, self._stored(duplicate), expires_at.isoformat()
+                )
+                self._reply_once(comment, intake.intake_id, (
+                    f"This request may duplicate {duplicate.url}. Reply `/continue {intake.intake_id}\nconfirm` "
+                    "to create a distinct story, or replace `confirm` with `decline` to leave the existing story unchanged."
+                ))
+                return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_CONFIRMATION_REQUIRED, outcome.assessment, intake.intake_id)
         if intake.publication_complete:
             return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
         conflict_status = intake.publication_conflict_status
@@ -205,6 +224,11 @@ class StoryIntakeService:
 
     def _handle_create(self, comment: ControlComment, source_request: str) -> IntakeOutcome:
         intake_id, reply_sent = self._begin(comment, source_request)
+        existing = self._intake(intake_id)
+        if existing.state == IntakeState.AWAITING_DUPLICATE_CONFIRMATION.value:
+            return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_CONFIRMATION_REQUIRED, _stored_assessment(existing.assessment_json), intake_id)
+        if existing.duplicate_confirmation == "declined":
+            return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_DECLINED, _stored_assessment(existing.assessment_json), intake_id)
         assessment = _assess(source_request)
         if assessment is not None:
             self._record_assessment(intake_id, assessment)
@@ -220,6 +244,22 @@ class StoryIntakeService:
         intake = self._store.intake(intake_id)
         if intake is None:
             return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+        if intake.state == IntakeState.AWAITING_DUPLICATE_CONFIRMATION.value:
+            if continuation is not None and (continuation.intake_id != intake_id or continuation.answer != answer):
+                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+            assessment = _stored_assessment(intake.assessment_json)
+            if intake.duplicate_confirmation_expires_at is not None and datetime.now(timezone.utc) >= datetime.fromisoformat(intake.duplicate_confirmation_expires_at):
+                self._store.record_duplicate_confirmation(intake_id, IntakeState.ASSESSMENT_READY.value, "expired")
+                return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_EXPIRED, assessment, intake_id)
+            if answer not in {"confirm", "decline"}:
+                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+            if continuation is None:
+                self._store.record_continuation(comment.comment_id, intake_id, answer)
+            if answer == "decline":
+                self._store.record_duplicate_confirmation(intake_id, IntakeState.ASSESSMENT_READY.value, "declined")
+                return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_DECLINED, assessment, intake_id)
+            self._store.record_duplicate_confirmation(intake_id, IntakeState.ASSESSMENT_READY.value, "confirmed")
+            return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment, intake_id)
         if continuation is not None and (continuation.intake_id != intake_id or continuation.answer != answer):
             return IntakeOutcome(IntakeOutcomeKind.REJECTED)
         if continuation is not None and intake.state == IntakeState.ASSESSMENT_READY.value:
