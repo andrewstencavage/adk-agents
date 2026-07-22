@@ -195,8 +195,10 @@ def test_declined_likely_duplicate_leaves_the_existing_story_unchanged(tmp_path)
     pending = service.create(comment("comment-1", "/create\nAdd CSV export. It must include visible headers."))
 
     declined = service.create(comment("comment-2", f"/continue {pending.intake_id}\ndecline"))
+    replay = service.create(comment("comment-2", f"/continue {pending.intake_id}\ndecline"))
 
     assert declined.kind is IntakeOutcomeKind.DUPLICATE_DECLINED
+    assert replay.kind is IntakeOutcomeKind.DUPLICATE_DECLINED
     assert board.created == []
     assert board.publication_state(existing) == StoryPublicationState(False, False, None, None)
 

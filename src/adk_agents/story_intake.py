@@ -262,6 +262,10 @@ class StoryIntakeService:
             return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment, intake_id)
         if continuation is not None and (continuation.intake_id != intake_id or continuation.answer != answer):
             return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+        if continuation is not None and intake.duplicate_confirmation == "declined":
+            return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_DECLINED, _stored_assessment(intake.assessment_json), intake_id)
+        if continuation is not None and intake.duplicate_confirmation == "expired":
+            return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_EXPIRED, _stored_assessment(intake.assessment_json), intake_id)
         if continuation is not None and intake.state == IntakeState.ASSESSMENT_READY.value:
             assessment = _stored_assessment(intake.assessment_json)
             return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
