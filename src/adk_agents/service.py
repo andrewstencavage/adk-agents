@@ -18,6 +18,8 @@ from .integration import ApprovedStoryWorkflow
 from .evidence import EvidenceLedger
 from .ids import uuid7
 from .operational_record import PollingLease
+from .control_intake import ControlIntakeWorker, GitHubControlIssue, GitHubStoryBoard, resolve_story_intake_options
+from .story_intake import StoryIntakeService
 
 
 def build_mock_manager(data_dir: Path) -> Manager:
@@ -96,7 +98,13 @@ def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) 
         board, build_assessment_gated_manager(record), workflow, reader,
         GitHubIssueBodyReader(issues_token, board_config.owner, board_config.repository),
     )
-    return LeasedPollingWorker(polling, PollingLease(record, project_id=board_config.project_id, owner_id=uuid7()))
+    control_tick = None
+    if config.control_issue_number is not None:
+        backlog, specialists = resolve_story_intake_options(project_graphql.execute, board_config.project_id, status_field_id, primary_specialist_field_id)
+        control = GitHubControlIssue(issues_token, board_config.owner, board_config.repository, config.control_issue_number)
+        stories = GitHubStoryBoard(issues_token, board_config.owner, board_config.repository, board_config.project_id, project_graphql.execute, status_field_id, primary_specialist_field_id, backlog, specialists)
+        control_tick = ControlIntakeWorker(control, StoryIntakeService(record.path, control, stories)).tick
+    return LeasedPollingWorker(polling, PollingLease(record, project_id=board_config.project_id, owner_id=uuid7()), control_tick)
 
 
 def run_mock_polling_loop() -> None:

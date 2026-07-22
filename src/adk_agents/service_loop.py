@@ -68,13 +68,14 @@ class PollingService:
 class LeasedPollingWorker:
     """Runs a PollingService only while this process owns the project lease."""
 
-    def __init__(self, polling: PollingService, lease: PollingLease) -> None:
-        self._polling, self._lease = polling, lease
+    def __init__(self, polling: PollingService, lease: PollingLease, side_tick: Callable[[], int] | None = None) -> None:
+        self._polling, self._lease, self._side_tick = polling, lease, side_tick
 
     def tick(self) -> int:
         if not self._lease.acquire():
             return 0
-        return self._polling.tick()
+        side_effects = 0 if self._side_tick is None else self._side_tick()
+        return self._polling.tick() + side_effects
 
     def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:
         if interval_seconds <= 0:

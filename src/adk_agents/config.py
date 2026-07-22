@@ -25,6 +25,7 @@ class ServiceConfig:
     github_agent_summary_field_id: str | None
     github_project_token_env: str
     github_issues_token_env: str
+    control_issue_number: int | None
 
     @classmethod
     def from_environment(cls) -> "ServiceConfig":
@@ -48,11 +49,14 @@ class ServiceConfig:
             raise ValueError("GitHub Project writer configuration requires project, Status field, and Dispatch ID field IDs")
         project_token_env = os.environ.get("ADK_AGENTS_GITHUB_PROJECT_TOKEN_ENV", "GITHUB_TOKEN")
         issues_token_env = os.environ.get("ADK_AGENTS_GITHUB_ISSUES_TOKEN_ENV", "ADK_AGENTS_GITHUB_ISSUES_TOKEN")
+        control_issue = os.environ.get("ADK_AGENTS_CONTROL_ISSUE_NUMBER")
         if not project_token_env.isidentifier() or not issues_token_env.isidentifier():
             raise ValueError("GitHub token configuration must name environment variables")
         if project_token_env == issues_token_env:
             raise ValueError("GitHub Project and Issues credentials must use separate environment variables")
-        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, primary_field, dispatch_field, summary_field, project_token_env, issues_token_env)
+        if control_issue is not None and (not control_issue.isdecimal() or int(control_issue) < 1):
+            raise ValueError("Control issue number must be a positive integer")
+        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, primary_field, dispatch_field, summary_field, project_token_env, issues_token_env, None if control_issue is None else int(control_issue))
 
     def board_config(self) -> BoardConfig | None:
         if self.github_project_id is None:
