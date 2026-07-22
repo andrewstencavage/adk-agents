@@ -6,11 +6,12 @@ import hashlib
 import json
 import re
 import secrets
-import sqlite3
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
+
+from .story_intake_store import StoryIntakeStore, StoredStory
 
 
 @dataclass(frozen=True)
@@ -118,43 +119,9 @@ class StoryIntakeService:
         control_issue: ControlIssueGateway,
         story_board: StoryBoardGateway | None = None,
     ) -> None:
-        self._path = Path(database_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._store = StoryIntakeStore(database_path)
         self._control_issue = control_issue
         self._story_board = story_board
-        with self._connect() as database:
-            database.executescript(
-                """CREATE TABLE IF NOT EXISTS story_intake (
-                    comment_id TEXT PRIMARY KEY,
-                    source_digest TEXT NOT NULL,
-                    source_request TEXT NOT NULL DEFAULT '',
-                    intake_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reply_id TEXT,
-                    assessment_json TEXT,
-                    published_story_number INTEGER,
-                    published_story_url TEXT,
-                    published_project_item_id TEXT,
-                    publication_complete INTEGER NOT NULL DEFAULT 0,
-                    issue_create_attempted INTEGER NOT NULL DEFAULT 0,
-                    publication_conflict_status TEXT
-                );
-                CREATE TABLE IF NOT EXISTS story_intake_continuation (
-                    comment_id TEXT PRIMARY KEY,
-                    intake_id TEXT NOT NULL,
-                    answer TEXT NOT NULL,
-                    reply_id TEXT
-                )"""
-            )
-            self._add_source_request_column(database)
-            self._add_column(database, "story_intake", "assessment_json TEXT")
-            self._add_column(database, "story_intake", "published_story_number INTEGER")
-            self._add_column(database, "story_intake", "published_story_url TEXT")
-            self._add_column(database, "story_intake", "published_project_item_id TEXT")
-            self._add_column(database, "story_intake", "publication_complete INTEGER NOT NULL DEFAULT 0")
-            self._add_column(database, "story_intake", "issue_create_attempted INTEGER NOT NULL DEFAULT 0")
-            self._add_column(database, "story_intake", "publication_conflict_status TEXT")
-            self._add_column(database, "story_intake_continuation", "reply_id TEXT")
 
     def handle(self, comment: ControlComment) -> IntakeOutcome:
         source_request = _source_request(comment.body)
@@ -175,21 +142,22 @@ class StoryIntakeService:
             return outcome
         if self._story_board is None:
             raise RuntimeError("Story intake publishing requires a task-board gateway")
-        if self._publication_complete(outcome.intake_id):
+        intake = self._intake(outcome.intake_id)
+        if intake.publication_complete:
             return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
-        conflict_status = self._conflict_status(outcome.intake_id)
+        conflict_status = intake.publication_conflict_status
         if conflict_status is not None:
             return self._record_conflict(comment, outcome, conflict_status)
         marker = f"<!-- adk-intake:v1 {outcome.intake_id} -->"
-        story = self._stored_story(outcome.intake_id) or self._story_board.find_story(marker)
+        story = self._published_story(intake) or self._story_board.find_story(marker)
         if story is None:
-            if self._issue_create_attempted(outcome.intake_id):
+            if intake.issue_create_attempted:
                 raise RuntimeError("Story creation response is uncertain; waiting for marker reconciliation")
-            self._record_issue_create_attempt(outcome.intake_id)
+            self._store.record_issue_create_attempt(self._required_intake_id(outcome.intake_id, "created"))
             story = self._story_board.create_issue(
                 outcome.assessment.title, f"{marker}\n{outcome.assessment.canonical_body}"
             )
-        self._record_story(outcome.intake_id, story)
+        self._store.record_story(self._required_intake_id(outcome.intake_id, "published"), self._stored(story))
         publication = self._story_board.publication_state(story)
         if publication.status not in (None, "Backlog"):
             return self._record_conflict(comment, outcome, publication.status)
@@ -212,36 +180,19 @@ class StoryIntakeService:
             "It is in Backlog; move it to Ready to approve and dispatch it."
         )
         self._reply_once(comment, outcome.intake_id or comment.comment_id, confirmation)
-        self._record_published(outcome.intake_id, story)
+        self._store.record_published(self._required_intake_id(outcome.intake_id, "published"), self._stored(story))
         return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
 
     def _record_conflict(
         self, comment: ControlComment, outcome: IntakeOutcome, status: str
     ) -> IntakeOutcome:
-        self._store_conflict(outcome.intake_id, status)
+        self._store.record_conflict(self._required_intake_id(outcome.intake_id, "conflicted"), status)
         self._reply_once(
             comment,
             outcome.intake_id or comment.comment_id,
             f"Story intake stopped because a user changed its status to {status}. No stale board updates were applied.",
         )
         return IntakeOutcome(IntakeOutcomeKind.CONFLICT, assessment=outcome.assessment, intake_id=outcome.intake_id)
-
-    def _conflict_status(self, intake_id: str | None) -> str | None:
-        if intake_id is None:
-            return None
-        with self._connect() as database:
-            row = database.execute(
-                "SELECT publication_conflict_status FROM story_intake WHERE intake_id = ?", (intake_id,)
-            ).fetchone()
-        return None if row is None else row["publication_conflict_status"]
-
-    def _store_conflict(self, intake_id: str | None, status: str) -> None:
-        if intake_id is None:
-            raise RuntimeError("conflicted Story intake must have an intake ID")
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake SET publication_conflict_status = ? WHERE intake_id = ?", (status, intake_id)
-            )
 
     def _handle_create(self, comment: ControlComment, source_request: str) -> IntakeOutcome:
         intake_id, reply_sent = self._begin(comment, source_request)
@@ -256,46 +207,27 @@ class StoryIntakeService:
         return IntakeOutcome(IntakeOutcomeKind.NEEDS_CLARIFICATION, intake_id=intake_id)
 
     def _handle_continuation(self, comment: ControlComment, intake_id: str, answer: str) -> IntakeOutcome:
-        with self._connect() as database:
-            continuation = database.execute(
-                "SELECT intake_id, answer, reply_id FROM story_intake_continuation WHERE comment_id = ?", (comment.comment_id,)
-            ).fetchone()
-            intake = database.execute(
-                "SELECT source_request, state, assessment_json FROM story_intake WHERE intake_id = ?", (intake_id,)
-            ).fetchone()
-            if intake is None:
-                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
-            if continuation is not None and (
-                continuation["intake_id"] != intake_id or continuation["answer"] != answer
-            ):
-                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
-            if continuation is not None and intake["state"] == IntakeState.ASSESSMENT_READY.value:
-                assessment = _stored_assessment(intake["assessment_json"])
-                return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
-            if intake["state"] != IntakeState.AWAITING_CONTINUATION.value:
-                return IntakeOutcome(IntakeOutcomeKind.REJECTED)
-            if continuation is None:
-                database.execute(
-                    "INSERT INTO story_intake_continuation(comment_id, intake_id, answer) VALUES (?, ?, ?)",
-                    (comment.comment_id, intake_id, answer),
-                )
-            answers = tuple(
-                row["answer"]
-                for row in database.execute(
-                    "SELECT answer FROM story_intake_continuation WHERE intake_id = ? ORDER BY rowid", (intake_id,)
-                )
-            )
-        source_request = "\n\n".join((intake["source_request"], *answers))
+        continuation = self._store.continuation_for_comment(comment.comment_id)
+        intake = self._store.intake(intake_id)
+        if intake is None:
+            return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+        if continuation is not None and (continuation.intake_id != intake_id or continuation.answer != answer):
+            return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+        if continuation is not None and intake.state == IntakeState.ASSESSMENT_READY.value:
+            assessment = _stored_assessment(intake.assessment_json)
+            return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
+        if intake.state != IntakeState.AWAITING_CONTINUATION.value:
+            return IntakeOutcome(IntakeOutcomeKind.REJECTED)
+        if continuation is None:
+            self._store.record_continuation(comment.comment_id, intake_id, answer)
+        source_request = "\n\n".join((intake.source_request, *self._store.continuation_answers(intake_id)))
         assessment = _assess(source_request)
         if assessment is not None:
             self._record_assessment(intake_id, assessment)
             return IntakeOutcome(IntakeOutcomeKind.ASSESSED, assessment=assessment, intake_id=intake_id)
 
         reply_id = self._reply_once(comment, intake_id, _clarification(intake_id, source_request))
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake_continuation SET reply_id = ? WHERE comment_id = ?", (reply_id, comment.comment_id)
-            )
+        self._store.record_continuation_reply(comment.comment_id, reply_id)
         return IntakeOutcome(IntakeOutcomeKind.NEEDS_CLARIFICATION, intake_id=intake_id)
 
     def _reply_once(self, comment: ControlComment, intake_id: str, message: str) -> str:
@@ -308,108 +240,41 @@ class StoryIntakeService:
 
     def _begin(self, comment: ControlComment, source_request: str) -> tuple[str, bool]:
         digest = hashlib.sha256(source_request.encode()).hexdigest()
-        with self._connect() as database:
-            row = database.execute(
-                "SELECT source_digest, intake_id, reply_id FROM story_intake WHERE comment_id = ?",
-                (comment.comment_id,),
-            ).fetchone()
-            if row is not None:
-                if row["source_digest"] != digest:
-                    raise ValueError("Control comment body changed after Story intake began")
-                return row["intake_id"], row["reply_id"] is not None
-            intake_id = f"intake-{secrets.token_hex(4)}"
-            database.execute(
-                "INSERT INTO story_intake(comment_id, source_digest, source_request, intake_id, state) VALUES (?, ?, ?, ?, ?)",
-                (comment.comment_id, digest, source_request, intake_id, IntakeState.ASSESSING.value),
-            )
-            return intake_id, False
+        intake = self._store.begin(comment_id=comment.comment_id, source_digest=digest, source_request=source_request,
+                                  intake_id=f"intake-{secrets.token_hex(4)}", state=IntakeState.ASSESSING.value)
+        if intake.source_digest != digest:
+            raise ValueError("Control comment body changed after Story intake began")
+        return intake.intake_id, intake.reply_id is not None
 
     def _record_reply(self, comment_id: str, reply_id: str) -> None:
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake SET state = ?, reply_id = ? WHERE comment_id = ?",
-                (IntakeState.AWAITING_CONTINUATION.value, reply_id, comment_id),
-            )
+        self._store.record_reply(comment_id, IntakeState.AWAITING_CONTINUATION.value, reply_id)
 
     def _record_assessment(self, intake_id: str, assessment: StoryAssessment) -> None:
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake SET state = ?, assessment_json = ? WHERE intake_id = ?",
-                (IntakeState.ASSESSMENT_READY.value, _serialize_assessment(assessment), intake_id),
-            )
+        self._store.record_assessment(intake_id, IntakeState.ASSESSMENT_READY.value, _serialize_assessment(assessment))
 
-    def _stored_story(self, intake_id: str | None) -> PublishedStory | None:
+    def _intake(self, intake_id: str | None):
         if intake_id is None:
-            return None
-        with self._connect() as database:
-            row = database.execute(
-                "SELECT published_story_number, published_story_url, published_project_item_id "
-                "FROM story_intake WHERE intake_id = ?", (intake_id,)
-            ).fetchone()
-        if row is None or row["published_story_number"] is None:
-            return None
-        return PublishedStory(row["published_story_number"], row["published_story_url"], row["published_project_item_id"])
-
-    def _publication_complete(self, intake_id: str | None) -> bool:
-        if intake_id is None:
-            return False
-        with self._connect() as database:
-            row = database.execute(
-                "SELECT publication_complete FROM story_intake WHERE intake_id = ?", (intake_id,)
-            ).fetchone()
-        return row is not None and row["publication_complete"] == 1
-
-    def _issue_create_attempted(self, intake_id: str | None) -> bool:
-        if intake_id is None:
-            return False
-        with self._connect() as database:
-            row = database.execute(
-                "SELECT issue_create_attempted FROM story_intake WHERE intake_id = ?", (intake_id,)
-            ).fetchone()
-        return row is not None and row["issue_create_attempted"] == 1
-
-    def _record_issue_create_attempt(self, intake_id: str | None) -> None:
-        if intake_id is None:
-            raise RuntimeError("created Story intake must have an intake ID")
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake SET issue_create_attempted = 1 WHERE intake_id = ?", (intake_id,)
-            )
-
-    def _record_story(self, intake_id: str | None, story: PublishedStory) -> None:
-        if intake_id is None:
-            raise RuntimeError("published Story intake must have an intake ID")
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake SET published_story_number = ?, published_story_url = ?, "
-                "published_project_item_id = ? WHERE intake_id = ?",
-                (story.number, story.url, story.project_item_id, intake_id),
-            )
-
-    def _record_published(self, intake_id: str | None, story: PublishedStory) -> None:
-        if intake_id is None:
-            raise RuntimeError("published Story intake must have an intake ID")
-        self._record_story(intake_id, story)
-        with self._connect() as database:
-            database.execute(
-                "UPDATE story_intake SET publication_complete = 1 WHERE intake_id = ?", (intake_id,)
-            )
-
-    def _connect(self) -> sqlite3.Connection:
-        database = sqlite3.connect(self._path)
-        database.row_factory = sqlite3.Row
-        return database
-
-    @classmethod
-    def _add_source_request_column(cls, database: sqlite3.Connection) -> None:
-        cls._add_column(database, "story_intake", "source_request TEXT NOT NULL DEFAULT ''")
+            raise RuntimeError("Story intake outcome must have an intake ID")
+        intake = self._store.intake(intake_id)
+        if intake is None:
+            raise RuntimeError("Story intake record does not exist")
+        return intake
 
     @staticmethod
-    def _add_column(database: sqlite3.Connection, table: str, definition: str) -> None:
-        name = definition.split()[0]
-        columns = {row["name"] for row in database.execute(f"PRAGMA table_info({table})")}
-        if name not in columns:
-            database.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+    def _required_intake_id(intake_id: str | None, action: str) -> str:
+        if intake_id is None:
+            raise RuntimeError(f"{action} Story intake must have an intake ID")
+        return intake_id
+
+    @staticmethod
+    def _stored(story: PublishedStory) -> StoredStory:
+        return StoredStory(story.number, story.url, story.project_item_id)
+
+    @staticmethod
+    def _published_story(intake) -> PublishedStory | None:
+        if intake.published_story_number is None:
+            return None
+        return PublishedStory(intake.published_story_number, intake.published_story_url or "", intake.published_project_item_id or "")
 
 
 def _source_request(body: str) -> str | None:
