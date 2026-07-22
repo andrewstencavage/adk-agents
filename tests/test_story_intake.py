@@ -6,6 +6,7 @@ from adk_agents.story_intake import (
     ControlComment,
     IntakeOutcomeKind,
     PublishedStory,
+    StoryPublicationState,
     StoryIntakeService,
 )
 
@@ -14,12 +15,16 @@ from adk_agents.story_intake import (
 class FakeControlIssue:
     replies: list[tuple[str, str]]
     fail_next_reply: bool = False
+    lose_next_reply_response: bool = False
 
     def reply(self, comment: ControlComment, body: str) -> str:
         if self.fail_next_reply:
             self.fail_next_reply = False
             raise RuntimeError("temporary reply failure")
         self.replies.append((comment.comment_id, body))
+        if self.lose_next_reply_response:
+            self.lose_next_reply_response = False
+            raise RuntimeError("lost reply response")
         return f"reply-{len(self.replies)}"
 
     def find_reply(self, comment: ControlComment, event_id: str) -> str | None:
@@ -38,8 +43,15 @@ class FakeStoryBoard:
     specialists: list[str]
     stories_by_marker: dict[str, PublishedStory] | None = None
     lose_create_response: bool = False
+    fail_next: str | None = None
+    statuses: dict[int, str | None] | None = None
+    story_labels: dict[int, set[str]] | None = None
+    story_projects: set[int] | None = None
+    story_specialists: dict[int, str | None] | None = None
+    issue_create_calls: int = 0
 
     def create_issue(self, title: str, body: str) -> PublishedStory:
+        self.issue_create_calls += 1
         marker = body.split("\n", 1)[0]
         story = PublishedStory(number=57, url="https://github.test/acme/adk-agents/issues/57", project_item_id="item-57")
         if self.stories_by_marker is not None:
@@ -55,15 +67,44 @@ class FakeStoryBoard:
 
     def add_label(self, story: PublishedStory, label: str) -> None:
         self.labels.append((story.number, label))
+        if self.story_labels is None:
+            self.story_labels = {}
+        self.story_labels.setdefault(story.number, set()).add(label)
+        self._fail_after("label")
 
     def add_to_project(self, story: PublishedStory) -> None:
         self.projects.append(story.number)
+        if self.story_projects is None:
+            self.story_projects = set()
+        self.story_projects.add(story.number)
+        self._fail_after("project")
 
     def set_backlog(self, story: PublishedStory) -> None:
         self.backlog.append(story.project_item_id)
+        if self.statuses is None:
+            self.statuses = {}
+        self.statuses[story.number] = "Backlog"
+        self._fail_after("backlog")
 
     def set_primary_specialist(self, story: PublishedStory, specialist: str) -> None:
         self.specialists.append(specialist)
+        if self.story_specialists is None:
+            self.story_specialists = {}
+        self.story_specialists[story.number] = specialist
+        self._fail_after("specialist")
+
+    def publication_state(self, story: PublishedStory) -> StoryPublicationState:
+        return StoryPublicationState(
+            self.story_labels is not None and "adk:story" in self.story_labels.get(story.number, set()),
+            self.story_projects is not None and story.number in self.story_projects,
+            None if self.statuses is None else self.statuses.get(story.number),
+            None if self.story_specialists is None else self.story_specialists.get(story.number),
+        )
+
+    def _fail_after(self, step: str) -> None:
+        if self.fail_next == step:
+            self.fail_next = None
+            raise RuntimeError(f"lost {step} response")
 
 
 def comment(comment_id: str, body: str) -> ControlComment:
@@ -107,7 +148,8 @@ def test_publishes_a_complete_assessment_as_a_backlog_specialist_story(tmp_path)
 def test_recovers_an_uncertain_issue_creation_from_its_intake_marker(tmp_path):
     control_issue = FakeControlIssue([])
     board = FakeStoryBoard([], [], [], [], [], {}, True)
-    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    database = tmp_path / "record.sqlite3"
+    service = StoryIntakeService(database, control_issue, board)
     request = "/create\nAdd CSV export. It must include visible headers."
 
     try:
@@ -116,10 +158,101 @@ def test_recovers_an_uncertain_issue_creation_from_its_intake_marker(tmp_path):
         pass
     else:
         raise AssertionError("expected the simulated lost response")
-    recovered = service.create(comment("comment-1", request))
+    recovered = StoryIntakeService(database, control_issue, board).create(comment("comment-1", request))
 
     assert recovered.kind is IntakeOutcomeKind.STORY_CREATED
     assert board.created == []
+
+
+def test_does_not_retry_an_unreconciled_issue_create_after_restart(tmp_path):
+    database = tmp_path / "record.sqlite3"
+    board = FakeStoryBoard([], [], [], [], [], lose_create_response=True)
+    request = "/create\nAdd CSV export. It must include visible headers."
+
+    try:
+        StoryIntakeService(database, FakeControlIssue([]), board).create(comment("comment-1", request))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected lost create response")
+    try:
+        StoryIntakeService(database, FakeControlIssue([]), board).create(comment("comment-1", request))
+    except RuntimeError as error:
+        assert "waiting for marker reconciliation" in str(error)
+    else:
+        raise AssertionError("expected uncertain creation to remain paused")
+
+    assert board.issue_create_calls == 1
+
+
+def test_recovers_every_partial_board_write_after_restart(tmp_path):
+    request = "/create\nAdd CSV export. It must include visible headers."
+    for step in ("label", "project", "backlog", "specialist"):
+        database = tmp_path / f"{step}.sqlite3"
+        board = FakeStoryBoard([], [], [], [], [], {}, False, step, {}, {}, set(), {})
+        service = StoryIntakeService(database, FakeControlIssue([]), board)
+
+        try:
+            service.create(comment("comment-1", request))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"expected lost {step} response")
+        recovered = StoryIntakeService(database, FakeControlIssue([]), board).create(comment("comment-1", request))
+
+        assert recovered.kind is IntakeOutcomeKind.STORY_CREATED
+        assert board.publication_state(PublishedStory(57, "", "item-57")) == StoryPublicationState(True, True, "Backlog", "Coding")
+
+
+def test_stops_recovery_when_user_moves_story_out_of_backlog(tmp_path):
+    control_issue = FakeControlIssue([])
+    board = FakeStoryBoard([], [], [], [], [], {}, False, "specialist", {}, {}, set(), {})
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    request = "/create\nAdd CSV export. It must include visible headers."
+
+    try:
+        service.create(comment("comment-1", request))
+    except RuntimeError:
+        pass
+    board.statuses[57] = "Ready"
+    outcome = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board).create(comment("comment-1", request))
+
+    assert outcome.kind is IntakeOutcomeKind.CONFLICT
+    assert board.specialists == ["Coding"]
+    assert "changed its status to Ready" in control_issue.replies[-1][1]
+
+
+def test_replaying_a_completed_intake_preserves_a_later_user_status_change(tmp_path):
+    control_issue = FakeControlIssue([])
+    board = FakeStoryBoard([], [], [], [], [])
+    service = StoryIntakeService(tmp_path / "record.sqlite3", control_issue, board)
+    request = "/create\nAdd CSV export. It must include visible headers."
+
+    service.create(comment("comment-1", request))
+    board.statuses[57] = "Ready"
+    replay = service.create(comment("comment-1", request))
+
+    assert replay.kind is IntakeOutcomeKind.STORY_CREATED
+    assert len(control_issue.replies) == 1
+
+
+def test_recovers_a_lost_confirmation_response_without_a_second_reply(tmp_path):
+    database = tmp_path / "record.sqlite3"
+    control_issue = FakeControlIssue([], lose_next_reply_response=True)
+    board = FakeStoryBoard([], [], [], [], [])
+    service = StoryIntakeService(database, control_issue, board)
+    request = "/create\nAdd CSV export. It must include visible headers."
+
+    try:
+        service.create(comment("comment-1", request))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected lost confirmation response")
+    recovered = StoryIntakeService(database, control_issue, board).create(comment("comment-1", request))
+
+    assert recovered.kind is IntakeOutcomeKind.STORY_CREATED
+    assert len(control_issue.replies) == 1
 
 
 def test_assesses_a_complete_create_request_into_canonical_story_content(tmp_path):
