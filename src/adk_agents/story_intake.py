@@ -6,12 +6,21 @@ import hashlib
 import json
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 from .story_intake_store import StoryIntakeStore, StoredStory
+
+
+def _uuid7_hex() -> str:
+    milliseconds = int(time.time() * 1_000)
+    value = (milliseconds << 80) | (0x7 << 76) | (secrets.randbits(12) << 64)
+    value |= (0b10 << 62) | secrets.randbits(62)
+    return UUID(int=value).hex
 
 
 @dataclass(frozen=True)
@@ -241,7 +250,7 @@ class StoryIntakeService:
     def _begin(self, comment: ControlComment, source_request: str) -> tuple[str, bool]:
         digest = hashlib.sha256(source_request.encode()).hexdigest()
         intake = self._store.begin(comment_id=comment.comment_id, source_digest=digest, source_request=source_request,
-                                  intake_id=f"intake-{secrets.token_hex(4)}", state=IntakeState.ASSESSING.value)
+                                  intake_id=f"intake-{_uuid7_hex()}", state=IntakeState.ASSESSING.value)
         if intake.source_digest != digest:
             raise ValueError("Control comment body changed after Story intake began")
         return intake.intake_id, intake.reply_id is not None
