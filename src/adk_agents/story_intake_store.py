@@ -51,15 +51,20 @@ class StoryIntakeStore:
         self._migrate()
 
     def begin(self, *, comment_id: str, source_digest: str, source_request: str, intake_id: str, state: str) -> StoredIntake:
-        existing = self.intake_for_comment(comment_id)
-        if existing is not None:
-            return existing
         with self._connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            row = database.execute("SELECT * FROM story_intake WHERE comment_id = ?", (comment_id,)).fetchone()
+            if row is not None:
+                database.commit()
+                return self._intake_from_row(row)
             database.execute(
                 "INSERT INTO story_intake(comment_id, source_digest, source_request, intake_id, state) VALUES (?, ?, ?, ?, ?)",
                 (comment_id, source_digest, source_request, intake_id, state),
             )
-        return self.intake_for_comment(comment_id) or self._missing_intake(comment_id)
+            database.commit()
+        return StoredIntake(
+            comment_id, source_digest, source_request, intake_id, state, None, None, None, False, False, None, None, None
+        )
 
     def intake_for_comment(self, comment_id: str) -> StoredIntake | None:
         with self._connect() as database:
@@ -126,18 +131,16 @@ class StoryIntakeStore:
                 database.execute("CREATE TABLE IF NOT EXISTS story_intake_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
                 migrated = database.execute("SELECT 1 FROM story_intake_migration WHERE version = ?", (self._MIGRATION_VERSION,)).fetchone()
                 if migrated is None:
-                    database.executescript("""
-                        CREATE TABLE IF NOT EXISTS story_intake (
-                            comment_id TEXT PRIMARY KEY, source_digest TEXT NOT NULL, source_request TEXT NOT NULL DEFAULT '',
-                            intake_id TEXT NOT NULL, state TEXT NOT NULL, reply_id TEXT, assessment_json TEXT,
-                            published_story_number INTEGER, published_story_url TEXT, published_project_item_id TEXT,
-                            publication_complete INTEGER NOT NULL DEFAULT 0, issue_create_attempted INTEGER NOT NULL DEFAULT 0,
-                            publication_conflict_status TEXT
-                        );
-                        CREATE TABLE IF NOT EXISTS story_intake_continuation (
-                            comment_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL, answer TEXT NOT NULL, reply_id TEXT
-                        );
-                    """)
+                    database.execute("""CREATE TABLE IF NOT EXISTS story_intake (
+                        comment_id TEXT PRIMARY KEY, source_digest TEXT NOT NULL, source_request TEXT NOT NULL DEFAULT '',
+                        intake_id TEXT NOT NULL, state TEXT NOT NULL, reply_id TEXT, assessment_json TEXT,
+                        published_story_number INTEGER, published_story_url TEXT, published_project_item_id TEXT,
+                        publication_complete INTEGER NOT NULL DEFAULT 0, issue_create_attempted INTEGER NOT NULL DEFAULT 0,
+                        publication_conflict_status TEXT
+                    )""")
+                    database.execute("""CREATE TABLE IF NOT EXISTS story_intake_continuation (
+                        comment_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL, answer TEXT NOT NULL, reply_id TEXT
+                    )""")
                     self._add_columns(database)
                     database.execute("INSERT INTO story_intake_migration(version, applied_at) VALUES (?, ?)", (self._MIGRATION_VERSION, datetime.now(timezone.utc).isoformat()))
                 database.commit()
@@ -167,11 +170,9 @@ class StoryIntakeStore:
             published_story_url=row["published_story_url"], published_project_item_id=row["published_project_item_id"],
         )
 
-    @staticmethod
-    def _missing_intake(comment_id: str) -> StoredIntake:
-        raise RuntimeError(f"Story intake record was not saved for {comment_id}")
-
     def _connect(self) -> sqlite3.Connection:
         database = sqlite3.connect(self._path)
         database.row_factory = sqlite3.Row
+        database.execute("PRAGMA foreign_keys = ON")
+        database.execute("PRAGMA journal_mode = WAL")
         return database
