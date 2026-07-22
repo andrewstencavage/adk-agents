@@ -37,12 +37,24 @@ class PublishedStory:
     project_item_id: str
 
 
+@dataclass(frozen=True)
+class StoryPublicationState:
+    """The board state that may have survived an interrupted publish call."""
+
+    has_story_label: bool
+    is_on_project: bool
+    status: str | None
+    primary_specialist: str | None
+
+
 class StoryBoardGateway(Protocol):
     """The narrow publishing capability for a complete Specialist story."""
 
     def create_issue(self, title: str, body: str) -> PublishedStory: ...
 
     def find_story(self, marker: str) -> PublishedStory | None: ...
+
+    def publication_state(self, story: PublishedStory) -> StoryPublicationState: ...
 
     def add_label(self, story: PublishedStory, label: str) -> None: ...
 
@@ -70,6 +82,7 @@ class IntakeOutcomeKind(str, Enum):
     NEEDS_CLARIFICATION = "needs_clarification"
     REJECTED = "rejected"
     STORY_CREATED = "story_created"
+    CONFLICT = "conflict"
 
 
 class IntakeState(str, Enum):
@@ -119,7 +132,12 @@ class StoryIntakeService:
                     state TEXT NOT NULL,
                     reply_id TEXT,
                     assessment_json TEXT,
-                    published_story_number INTEGER
+                    published_story_number INTEGER,
+                    published_story_url TEXT,
+                    published_project_item_id TEXT,
+                    publication_complete INTEGER NOT NULL DEFAULT 0,
+                    issue_create_attempted INTEGER NOT NULL DEFAULT 0,
+                    publication_conflict_status TEXT
                 );
                 CREATE TABLE IF NOT EXISTS story_intake_continuation (
                     comment_id TEXT PRIMARY KEY,
@@ -131,6 +149,11 @@ class StoryIntakeService:
             self._add_source_request_column(database)
             self._add_column(database, "story_intake", "assessment_json TEXT")
             self._add_column(database, "story_intake", "published_story_number INTEGER")
+            self._add_column(database, "story_intake", "published_story_url TEXT")
+            self._add_column(database, "story_intake", "published_project_item_id TEXT")
+            self._add_column(database, "story_intake", "publication_complete INTEGER NOT NULL DEFAULT 0")
+            self._add_column(database, "story_intake", "issue_create_attempted INTEGER NOT NULL DEFAULT 0")
+            self._add_column(database, "story_intake", "publication_conflict_status TEXT")
             self._add_column(database, "story_intake_continuation", "reply_id TEXT")
 
     def handle(self, comment: ControlComment) -> IntakeOutcome:
@@ -152,18 +175,38 @@ class StoryIntakeService:
             return outcome
         if self._story_board is None:
             raise RuntimeError("Story intake publishing requires a task-board gateway")
-        if self._published(outcome.intake_id):
+        if self._publication_complete(outcome.intake_id):
             return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
+        conflict_status = self._conflict_status(outcome.intake_id)
+        if conflict_status is not None:
+            return self._record_conflict(comment, outcome, conflict_status)
         marker = f"<!-- adk-intake:v1 {outcome.intake_id} -->"
-        story = self._story_board.find_story(marker)
+        story = self._stored_story(outcome.intake_id) or self._story_board.find_story(marker)
         if story is None:
+            if self._issue_create_attempted(outcome.intake_id):
+                raise RuntimeError("Story creation response is uncertain; waiting for marker reconciliation")
+            self._record_issue_create_attempt(outcome.intake_id)
             story = self._story_board.create_issue(
                 outcome.assessment.title, f"{marker}\n{outcome.assessment.canonical_body}"
             )
-        self._story_board.add_label(story, "adk:story")
-        self._story_board.add_to_project(story)
-        self._story_board.set_backlog(story)
-        self._story_board.set_primary_specialist(story, outcome.assessment.primary_specialist)
+        self._record_story(outcome.intake_id, story)
+        publication = self._story_board.publication_state(story)
+        if publication.status not in (None, "Backlog"):
+            return self._record_conflict(comment, outcome, publication.status)
+        if not publication.has_story_label:
+            self._story_board.add_label(story, "adk:story")
+        if not publication.is_on_project:
+            self._story_board.add_to_project(story)
+        publication = self._story_board.publication_state(story)
+        if publication.status not in (None, "Backlog"):
+            return self._record_conflict(comment, outcome, publication.status)
+        if publication.status != "Backlog":
+            self._story_board.set_backlog(story)
+        publication = self._story_board.publication_state(story)
+        if publication.status != "Backlog":
+            return self._record_conflict(comment, outcome, publication.status or "an unknown status")
+        if publication.primary_specialist != outcome.assessment.primary_specialist:
+            self._story_board.set_primary_specialist(story, outcome.assessment.primary_specialist)
         confirmation = (
             f"Created {story.url} with proposed Primary specialist {outcome.assessment.primary_specialist}. "
             "It is in Backlog; move it to Ready to approve and dispatch it."
@@ -171,6 +214,34 @@ class StoryIntakeService:
         self._reply_once(comment, outcome.intake_id or comment.comment_id, confirmation)
         self._record_published(outcome.intake_id, story)
         return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
+
+    def _record_conflict(
+        self, comment: ControlComment, outcome: IntakeOutcome, status: str
+    ) -> IntakeOutcome:
+        self._store_conflict(outcome.intake_id, status)
+        self._reply_once(
+            comment,
+            outcome.intake_id or comment.comment_id,
+            f"Story intake stopped because a user changed its status to {status}. No stale board updates were applied.",
+        )
+        return IntakeOutcome(IntakeOutcomeKind.CONFLICT, assessment=outcome.assessment, intake_id=outcome.intake_id)
+
+    def _conflict_status(self, intake_id: str | None) -> str | None:
+        if intake_id is None:
+            return None
+        with self._connect() as database:
+            row = database.execute(
+                "SELECT publication_conflict_status FROM story_intake WHERE intake_id = ?", (intake_id,)
+            ).fetchone()
+        return None if row is None else row["publication_conflict_status"]
+
+    def _store_conflict(self, intake_id: str | None, status: str) -> None:
+        if intake_id is None:
+            raise RuntimeError("conflicted Story intake must have an intake ID")
+        with self._connect() as database:
+            database.execute(
+                "UPDATE story_intake SET publication_conflict_status = ? WHERE intake_id = ?", (status, intake_id)
+            )
 
     def _handle_create(self, comment: ControlComment, source_request: str) -> IntakeOutcome:
         intake_id, reply_sent = self._begin(comment, source_request)
@@ -267,21 +338,61 @@ class StoryIntakeService:
                 (IntakeState.ASSESSMENT_READY.value, _serialize_assessment(assessment), intake_id),
             )
 
-    def _published(self, intake_id: str | None) -> bool:
+    def _stored_story(self, intake_id: str | None) -> PublishedStory | None:
+        if intake_id is None:
+            return None
+        with self._connect() as database:
+            row = database.execute(
+                "SELECT published_story_number, published_story_url, published_project_item_id "
+                "FROM story_intake WHERE intake_id = ?", (intake_id,)
+            ).fetchone()
+        if row is None or row["published_story_number"] is None:
+            return None
+        return PublishedStory(row["published_story_number"], row["published_story_url"], row["published_project_item_id"])
+
+    def _publication_complete(self, intake_id: str | None) -> bool:
         if intake_id is None:
             return False
         with self._connect() as database:
             row = database.execute(
-                "SELECT published_story_number FROM story_intake WHERE intake_id = ?", (intake_id,)
+                "SELECT publication_complete FROM story_intake WHERE intake_id = ?", (intake_id,)
             ).fetchone()
-        return row is not None and row["published_story_number"] is not None
+        return row is not None and row["publication_complete"] == 1
 
-    def _record_published(self, intake_id: str | None, story: PublishedStory) -> None:
+    def _issue_create_attempted(self, intake_id: str | None) -> bool:
+        if intake_id is None:
+            return False
+        with self._connect() as database:
+            row = database.execute(
+                "SELECT issue_create_attempted FROM story_intake WHERE intake_id = ?", (intake_id,)
+            ).fetchone()
+        return row is not None and row["issue_create_attempted"] == 1
+
+    def _record_issue_create_attempt(self, intake_id: str | None) -> None:
+        if intake_id is None:
+            raise RuntimeError("created Story intake must have an intake ID")
+        with self._connect() as database:
+            database.execute(
+                "UPDATE story_intake SET issue_create_attempted = 1 WHERE intake_id = ?", (intake_id,)
+            )
+
+    def _record_story(self, intake_id: str | None, story: PublishedStory) -> None:
         if intake_id is None:
             raise RuntimeError("published Story intake must have an intake ID")
         with self._connect() as database:
             database.execute(
-                "UPDATE story_intake SET published_story_number = ? WHERE intake_id = ?", (story.number, intake_id)
+                "UPDATE story_intake SET published_story_number = ?, published_story_url = ?, "
+                "published_project_item_id = ? WHERE intake_id = ?",
+                (story.number, story.url, story.project_item_id, intake_id),
+            )
+
+    def _record_published(self, intake_id: str | None, story: PublishedStory) -> None:
+        if intake_id is None:
+            raise RuntimeError("published Story intake must have an intake ID")
+        self._record_story(intake_id, story)
+        with self._connect() as database:
+            database.execute(
+                "UPDATE story_intake SET publication_complete = 1 WHERE intake_id = ?", (intake_id,)
             )
 
     def _connect(self) -> sqlite3.Connection:
