@@ -172,6 +172,11 @@ class StoryIntakeService:
                 ))
                 return IntakeOutcome(IntakeOutcomeKind.DUPLICATE_CONFIRMATION_REQUIRED, outcome.assessment, intake.intake_id)
         if intake.publication_complete:
+            if intake.confirmation_reply_id is None:
+                story = self._published_story(intake)
+                if story is not None:
+                    reply_id = self._reply_once(comment, intake.intake_id, f"Created {story.url}. It is in Backlog; move it to Ready to approve and dispatch it.")
+                    self._store.record_confirmation_reply(intake.intake_id, reply_id)
             return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
         conflict_status = intake.publication_conflict_status
         if conflict_status is not None:
@@ -207,8 +212,8 @@ class StoryIntakeService:
             f"Created {story.url} with proposed Primary specialist {outcome.assessment.primary_specialist}. "
             "It is in Backlog; move it to Ready to approve and dispatch it."
         )
-        self._reply_once(comment, outcome.intake_id or comment.comment_id, confirmation)
-        self._store.record_published(self._required_intake_id(outcome.intake_id, "published"), self._stored(story))
+        reply_id = self._reply_once(comment, outcome.intake_id or comment.comment_id, confirmation)
+        self._store.record_published(self._required_intake_id(outcome.intake_id, "published"), self._stored(story), reply_id)
         return IntakeOutcome(IntakeOutcomeKind.STORY_CREATED, assessment=outcome.assessment, intake_id=outcome.intake_id)
 
     def _record_conflict(

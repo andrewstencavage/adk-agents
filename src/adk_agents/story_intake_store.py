@@ -28,6 +28,7 @@ class StoredIntake:
     duplicate_project_item_id: str | None
     duplicate_confirmation: str | None
     duplicate_confirmation_expires_at: str | None
+    confirmation_reply_id: str | None
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class StoredStory:
 class StoryIntakeStore:
     """Owns Story intake schema migration and all durable recovery records."""
 
-    _MIGRATION_VERSION = 2
+    _MIGRATION_VERSION = 3
 
     def __init__(self, database_path: str | Path) -> None:
         self._path = Path(database_path)
@@ -69,7 +70,7 @@ class StoryIntakeStore:
             database.commit()
         return StoredIntake(
             comment_id, source_digest, source_request, intake_id, state, None, None, None, False, False, None, None, None,
-            None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
     def intake_for_comment(self, comment_id: str) -> StoredIntake | None:
@@ -122,9 +123,12 @@ class StoryIntakeStore:
             (story.number, story.url, story.project_item_id, intake_id),
         )
 
-    def record_published(self, intake_id: str, story: StoredStory) -> None:
+    def record_published(self, intake_id: str, story: StoredStory, confirmation_reply_id: str) -> None:
         self.record_story(intake_id, story)
-        self._update("UPDATE story_intake SET publication_complete = 1 WHERE intake_id = ?", (intake_id,))
+        self._update("UPDATE story_intake SET publication_complete = 1, confirmation_reply_id = ? WHERE intake_id = ?", (confirmation_reply_id, intake_id))
+
+    def record_confirmation_reply(self, intake_id: str, reply_id: str) -> None:
+        self._update("UPDATE story_intake SET confirmation_reply_id = ? WHERE intake_id = ?", (reply_id, intake_id))
 
     def request_duplicate_confirmation(self, intake_id: str, state: str, story: StoredStory, expires_at: str) -> None:
         self._update(
@@ -155,7 +159,7 @@ class StoryIntakeStore:
                         published_story_number INTEGER, published_story_url TEXT, published_project_item_id TEXT,
                         publication_complete INTEGER NOT NULL DEFAULT 0, issue_create_attempted INTEGER NOT NULL DEFAULT 0,
                         publication_conflict_status TEXT, duplicate_story_number INTEGER, duplicate_story_url TEXT,
-                        duplicate_project_item_id TEXT, duplicate_confirmation TEXT, duplicate_confirmation_expires_at TEXT
+                        duplicate_project_item_id TEXT, duplicate_confirmation TEXT, duplicate_confirmation_expires_at TEXT, confirmation_reply_id TEXT
                     )""")
                     database.execute("""CREATE TABLE IF NOT EXISTS story_intake_continuation (
                         comment_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL, answer TEXT NOT NULL, reply_id TEXT
@@ -170,7 +174,7 @@ class StoryIntakeStore:
     @staticmethod
     def _add_columns(database: sqlite3.Connection) -> None:
         definitions = {
-            "story_intake": ("source_request TEXT NOT NULL DEFAULT ''", "assessment_json TEXT", "published_story_number INTEGER", "published_story_url TEXT", "published_project_item_id TEXT", "publication_complete INTEGER NOT NULL DEFAULT 0", "issue_create_attempted INTEGER NOT NULL DEFAULT 0", "publication_conflict_status TEXT", "duplicate_story_number INTEGER", "duplicate_story_url TEXT", "duplicate_project_item_id TEXT", "duplicate_confirmation TEXT", "duplicate_confirmation_expires_at TEXT"),
+            "story_intake": ("source_request TEXT NOT NULL DEFAULT ''", "assessment_json TEXT", "published_story_number INTEGER", "published_story_url TEXT", "published_project_item_id TEXT", "publication_complete INTEGER NOT NULL DEFAULT 0", "issue_create_attempted INTEGER NOT NULL DEFAULT 0", "publication_conflict_status TEXT", "duplicate_story_number INTEGER", "duplicate_story_url TEXT", "duplicate_project_item_id TEXT", "duplicate_confirmation TEXT", "duplicate_confirmation_expires_at TEXT", "confirmation_reply_id TEXT"),
             "story_intake_continuation": ("reply_id TEXT",),
         }
         for table, columns in definitions.items():
@@ -190,6 +194,7 @@ class StoryIntakeStore:
             duplicate_story_number=row["duplicate_story_number"], duplicate_story_url=row["duplicate_story_url"],
             duplicate_project_item_id=row["duplicate_project_item_id"], duplicate_confirmation=row["duplicate_confirmation"],
             duplicate_confirmation_expires_at=row["duplicate_confirmation_expires_at"],
+            confirmation_reply_id=row["confirmation_reply_id"],
         )
 
     def _connect(self) -> sqlite3.Connection:
