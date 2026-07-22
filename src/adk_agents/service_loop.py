@@ -74,8 +74,12 @@ class LeasedPollingWorker:
     def tick(self) -> int:
         if not self._lease.acquire():
             return 0
-        side_effects = 0 if self._side_tick is None else self._side_tick()
-        return self._polling.tick() + side_effects
+        dispatched = self._polling.tick()
+        try:
+            intake = 0 if self._side_tick is None else self._side_tick()
+        except Exception:
+            intake = 0
+        return dispatched + intake
 
     def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:
         if interval_seconds <= 0:

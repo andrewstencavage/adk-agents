@@ -27,8 +27,14 @@ class GitHubControlIssue:
         self._token, self._owner, self._repository, self._issue_number = token, owner, repository, issue_number
 
     def comments(self) -> list[ControlComment]:
-        payload = self._request("GET", f"/issues/{self._issue_number}/comments?per_page=100")
-        return [ControlComment(str(item["id"]), item["user"]["login"], item.get("body") or "") for item in payload]
+        url = f"https://api.github.com/repos/{self._owner}/{self._repository}/issues/{self._issue_number}/comments?per_page=100"
+        comments: list[ControlComment] = []
+        while url:
+            request = Request(url, headers={"Authorization": f"Bearer {self._token}", "Accept": "application/vnd.github+json"})
+            with urlopen(request, timeout=30) as response:
+                comments.extend(ControlComment(str(item["id"]), item["user"]["login"], item.get("body") or "") for item in json.load(response))
+                url = _next_link(response.headers.get("Link"))
+        return comments
 
     def reply(self, _comment: ControlComment, body: str) -> str:
         return str(self._request("POST", f"/issues/{self._issue_number}/comments", {"body": body})["id"])
@@ -77,13 +83,6 @@ class GitHubStoryBoard:
         return next((self._story(issue) for issue in self._issues() if marker in (issue.get("body") or "")), None)
 
     def find_likely_duplicate(self, assessment: StoryAssessment) -> PublishedStory | None:
-        desired = set(re.findall(r"[a-z0-9]+", assessment.title.casefold()))
-        for issue in self._issues():
-            if "adk:story" not in {label["name"] for label in issue.get("labels", [])}:
-                continue
-            actual = set(re.findall(r"[a-z0-9]+", issue["title"].casefold()))
-            if desired and len(desired & actual) / len(desired | actual) >= 0.6:
-                return self._story(issue)
         return None
 
     def publication_state(self, story: PublishedStory) -> StoryPublicationState:
@@ -148,3 +147,13 @@ class GitHubStoryBoard:
 _PROJECT_ITEMS = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { items(first: 100) { nodes { id content { ... on Issue { number } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id } } name } } } } } } }"""
 _SET_PROJECT_FIELD = """mutation($project: ID!, $item: ID!, $field: ID!, $value: ProjectV2FieldValue!) { updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: $value}) { projectV2Item { id } } }"""
 _PROJECT_FIELDS = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { id options { id name } } } } } } }"""
+
+
+def _next_link(header: str | None) -> str | None:
+    if not header:
+        return None
+    for part in header.split(","):
+        url, marker, _rest = part.strip().partition('; rel="next"')
+        if marker and url.startswith("<") and url.endswith(">"):
+            return url[1:-1]
+    return None
