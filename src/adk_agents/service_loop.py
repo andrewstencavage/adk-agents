@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import logging
 from time import sleep
 from typing import Any, Protocol
 from .task_format import parse_task_block
+
+_LOG = logging.getLogger(__name__)
 
 def task_from_issue_body(body: str, dispatch_id: str) -> dict[str, Any]:
     """Build the Manager input only from the explicit, validated issue block."""
@@ -78,6 +81,7 @@ class LeasedPollingWorker:
         try:
             intake = 0 if self._side_tick is None else self._side_tick()
         except Exception:
+            _LOG.exception("Control intake tick failed")
             intake = 0
         return dispatched + intake
 
