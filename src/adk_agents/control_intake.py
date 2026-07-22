@@ -144,7 +144,7 @@ class GitHubStoryBoard:
             return json.load(response)
 
 
-_PROJECT_ITEMS = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { items(first: 100) { nodes { id content { ... on Issue { number } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id } } name } } } } } } }"""
+_PROJECT_ITEMS = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { items(first: 100) { nodes { id content { ... on Issue { number } } fieldValues(first: 30) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { id } } name } } } } } } } }"""
 _SET_PROJECT_FIELD = """mutation($project: ID!, $item: ID!, $field: ID!, $value: ProjectV2FieldValue!) { updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: $value}) { projectV2Item { id } } }"""
 _PROJECT_FIELDS = """query($project: ID!) { node(id: $project) { ... on ProjectV2 { fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { id options { id name } } } } } } }"""
 
