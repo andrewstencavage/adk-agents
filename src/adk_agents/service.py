@@ -11,7 +11,7 @@ from .manager import Manager, accepted_result
 from .contracts import SpecialistType
 from .routing import ModelRouter
 from .trace import TraceStore
-from .service_loop import LeasedPollingWorker, PollingService, task_from_issue_body
+from .service_loop import ControlPollingHealth, LeasedPollingWorker, PollingService, task_from_issue_body
 from .task_board import DispatchStore, TaskBoardAdapter
 from .github_project_reader import GitHubGraphQLTransport, GitHubIssueBodyReader, GitHubIssueComments, GitHubProjectFieldWriter, GitHubProjectReader, GitHubTaskBoardGateway, resolve_status_option_ids
 from .integration import ApprovedStoryWorkflow
@@ -100,12 +100,19 @@ def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) 
         GitHubIssueBodyReader(issues_token, board_config.owner, board_config.repository),
     )
     control_tick = None
+    control_health = None
     if config.control_issue_number is not None:
         backlog, specialists = resolve_story_intake_options(project_graphql.execute, board_config.project_id, status_field_id, primary_specialist_field_id)
         control = GitHubControlIssue(issues_token, board_config.owner, board_config.repository, config.control_issue_number)
         stories = GitHubStoryBoard(issues_token, board_config.owner, board_config.repository, board_config.project_id, project_graphql.execute, status_field_id, primary_specialist_field_id, backlog, specialists)
         control_tick = ControlIntakeWorker(control, StoryIntakeService(record.path, control, stories)).tick
-    return LeasedPollingWorker(polling, PollingLease(record, project_id=board_config.project_id, owner_id=uuid7()), control_tick)
+        control_health = ControlPollingHealth(record, control.report_operational_incident)
+    return LeasedPollingWorker(
+        polling,
+        PollingLease(record, project_id=board_config.project_id, owner_id=uuid7()),
+        control_tick,
+        control_health=control_health,
+    )
 
 
 def run_mock_polling_loop() -> None:

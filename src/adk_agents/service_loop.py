@@ -3,12 +3,41 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import hashlib
 import logging
+from datetime import datetime
 from time import sleep
 from typing import Any, Protocol
+from .operational_record import OperationalRecord
+from .operations import PersistentIncidentTracker
 from .task_format import parse_task_block
 
 _LOG = logging.getLogger(__name__)
+
+
+class ControlPollingHealth:
+    """Durably observes Control intake without exposing exception details."""
+
+    _operation = "control_intake_poll"
+
+    def __init__(
+        self,
+        record: OperationalRecord,
+        publish: Callable[[str, str], None],
+        *,
+        now: Callable[[], datetime] | None = None,
+        max_failures: int | None = None,
+    ) -> None:
+        self._incidents = PersistentIncidentTracker(record, publish, now=now, max_failures=max_failures)
+
+    def record_failure(self, error: BaseException) -> str | None:
+        error_class = f"{type(error).__module__}.{type(error).__qualname__}"
+        evidence_ref = "sha256:" + hashlib.sha256(error_class.encode()).hexdigest()
+        return self._incidents.record_failure(self._operation, evidence_ref)
+
+    def record_success(self) -> str | None:
+        return self._incidents.record_success(self._operation)
+
 
 def task_from_issue_body(body: str, dispatch_id: str) -> dict[str, Any]:
     """Build the Manager input only from the explicit, validated issue block."""
@@ -71,8 +100,16 @@ class PollingService:
 class LeasedPollingWorker:
     """Runs a PollingService only while this process owns the project lease."""
 
-    def __init__(self, polling: PollingService, lease: PollingLease, side_tick: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self,
+        polling: PollingService,
+        lease: PollingLease,
+        side_tick: Callable[[], int] | None = None,
+        *,
+        control_health: ControlPollingHealth | None = None,
+    ) -> None:
         self._polling, self._lease, self._side_tick = polling, lease, side_tick
+        self._control_health = control_health
 
     def tick(self) -> int:
         if not self._lease.acquire():
@@ -80,9 +117,20 @@ class LeasedPollingWorker:
         dispatched = self._polling.tick()
         try:
             intake = 0 if self._side_tick is None else self._side_tick()
-        except Exception:
-            _LOG.exception("Control intake tick failed")
+        except Exception as error:
+            _LOG.error("Control intake tick failed: %s", type(error).__name__)
+            if self._control_health is not None:
+                try:
+                    self._control_health.record_failure(error)
+                except Exception as incident_error:
+                    _LOG.error("Control intake incident update failed: %s", type(incident_error).__name__)
             intake = 0
+        else:
+            if self._side_tick is not None and self._control_health is not None:
+                try:
+                    self._control_health.record_success()
+                except Exception as incident_error:
+                    _LOG.error("Control intake recovery update failed: %s", type(incident_error).__name__)
         return dispatched + intake
 
     def run_forever(self, *, interval_seconds: float, should_stop: Callable[[], bool] = lambda: False, wait: Callable[[float], None] = sleep) -> None:

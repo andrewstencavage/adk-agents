@@ -59,6 +59,10 @@ _MIGRATION_9_STATEMENTS = (
     "CREATE TABLE manager_admission_trace (trace_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, dispatch_id TEXT, specialist TEXT, decision TEXT NOT NULL CHECK(decision IN ('accepted', 'denied')), request_digest TEXT NOT NULL, result_digest TEXT, error_class TEXT)",
 )
 _MIGRATION_9 = "\n".join(_MIGRATION_9_STATEMENTS)
+_MIGRATION_10_STATEMENTS = (
+    "ALTER TABLE operational_incident ADD COLUMN incident_published INTEGER NOT NULL DEFAULT 0",
+)
+_MIGRATION_10 = "\n".join(_MIGRATION_10_STATEMENTS)
 
 
 class OperationalRecord:
@@ -72,7 +76,7 @@ class OperationalRecord:
         with self.connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migration (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)")
-            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4), (5, _MIGRATION_5_STATEMENTS, _MIGRATION_5), (6, _MIGRATION_6_STATEMENTS, _MIGRATION_6), (7, _MIGRATION_7_STATEMENTS, _MIGRATION_7), (8, _MIGRATION_8_STATEMENTS, _MIGRATION_8), (9, _MIGRATION_9_STATEMENTS, _MIGRATION_9)):
+            for version, statements, migration in ((1, _MIGRATION_1_STATEMENTS, _MIGRATION_1), (2, _MIGRATION_2_STATEMENTS, _MIGRATION_2), (3, _MIGRATION_3_STATEMENTS, _MIGRATION_3), (4, _MIGRATION_4_STATEMENTS, _MIGRATION_4), (5, _MIGRATION_5_STATEMENTS, _MIGRATION_5), (6, _MIGRATION_6_STATEMENTS, _MIGRATION_6), (7, _MIGRATION_7_STATEMENTS, _MIGRATION_7), (8, _MIGRATION_8_STATEMENTS, _MIGRATION_8), (9, _MIGRATION_9_STATEMENTS, _MIGRATION_9), (10, _MIGRATION_10_STATEMENTS, _MIGRATION_10)):
                 checksum = hashlib.sha256(migration.encode()).hexdigest()
                 existing = connection.execute("SELECT checksum FROM schema_migration WHERE version = ?", (version,)).fetchone()
                 if existing is not None and existing[0] != checksum:

@@ -42,6 +42,14 @@ class GitHubControlIssue:
     def find_reply(self, _comment: ControlComment, event_id: str) -> str | None:
         return next((comment.comment_id for comment in self.comments() if event_id in comment.body), None)
 
+    def report_operational_incident(self, incident: str, evidence_ref: str) -> None:
+        """Publish only the redacted incident identity and evidence reference."""
+        if evidence_ref == "recovered":
+            body = f"## Agent update · Recovered\n\nOperational incident `{incident}` has been healthy for 24 hours."
+        else:
+            body = f"## Agent update · Operational incident\n\nIncident: `{incident}`\n\nEvidence: {evidence_ref}"
+        self._request("POST", f"/issues/{self._issue_number}/comments", {"body": body})
+
     def _request(self, method: str, path: str, payload: dict[str, object] | None = None) -> Any:
         request = Request(
             f"https://api.github.com/repos/{self._owner}/{self._repository}{path}",
