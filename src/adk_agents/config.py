@@ -26,6 +26,7 @@ class ServiceConfig:
     github_project_token_env: str
     github_issues_token_env: str
     control_issue_number: int | None
+    allow_unassessed: bool
 
     @classmethod
     def from_environment(cls) -> "ServiceConfig":
@@ -56,7 +57,8 @@ class ServiceConfig:
             raise ValueError("GitHub Project and Issues credentials must use separate environment variables")
         if control_issue is not None and (not control_issue.isdecimal() or int(control_issue) < 1):
             raise ValueError("Control issue number must be a positive integer")
-        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, primary_field, dispatch_field, summary_field, project_token_env, issues_token_env, None if control_issue is None else int(control_issue))
+        allow_unassessed = os.environ.get("ADK_AGENTS_ALLOW_UNASSESSED", "").casefold() in {"1", "true", "yes"}
+        return cls(data_dir, backup_dir, project_id, owner, repository, ready, progress, blocked, status_field, primary_field, dispatch_field, summary_field, project_token_env, issues_token_env, None if control_issue is None else int(control_issue), allow_unassessed)
 
     def board_config(self) -> BoardConfig | None:
         if self.github_project_id is None:

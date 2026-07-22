@@ -94,8 +94,9 @@ def build_live_polling_worker(config: ServiceConfig, record: OperationalRecord) 
     gateway = GitHubTaskBoardGateway(reader, writer, GitHubIssueComments(issues_token, board_config.owner, board_config.repository))
     board = TaskBoardAdapter(board_config, gateway, DispatchStore(record.path))
     workflow = ApprovedStoryWorkflow(EvidenceLedger(record), lambda _event: None)
+    manager = build_mock_manager(record.path.parent) if config.allow_unassessed else build_assessment_gated_manager(record)
     polling = build_polling_service(
-        board, build_assessment_gated_manager(record), workflow, reader,
+        board, manager, workflow, reader,
         GitHubIssueBodyReader(issues_token, board_config.owner, board_config.repository),
     )
     control_tick = None
